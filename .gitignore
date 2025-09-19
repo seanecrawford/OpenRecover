@@ -1,0 +1,27 @@
+﻿__pycache__/
+*.py[cod]
+*.pyd
+*.pyo
+*.egg-info/
+.env
+.env.*
+.venv/
+venv/
+build/
+dist/
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.log
+# Large/binary outputs (use Releases, not git)
+*.img
+*.iso
+*.vhd*
+*.dd
+*.bin
+*.zip
+*.7z
+*.exe
+*.dll
+*.msi

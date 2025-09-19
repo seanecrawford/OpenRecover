@@ -1,0 +1,78 @@
+name: Windows Build (EXE + Installer)
+
+on:
+  push:
+    branches: [ main ]
+    tags: [ 'v*' ]             # tag vX.Y.Z to publish a Release
+  pull_request:
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~\AppData\Local\pip\Cache
+          key: pip-${{ runner.os }}-${{ hashFiles('requirements.txt') }}
+          restore-keys: pip-${{ runner.os }}-
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          if (Test-Path requirements.txt) {
+            pip install -r requirements.txt
+          } else {
+            pip install PySide6==6.* pyinstaller==6.*
+          }
+
+      - name: Build EXEs (Qt UI)
+        run: |
+          pyinstaller -F -w -n OpenRecoverProQt        src/main.py
+          pyinstaller -F -w --uac-admin -n OpenRecoverProQt_Admin src/main.py
+
+      # Build installer only if .iss exists
+      - name: Install Inno Setup
+        if: ${{ hashFiles('installer/OpenRecoverProQt.iss') != '' }}
+        run: choco install innosetup --no-progress
+
+      - name: Build installer
+        if: ${{ hashFiles('installer/OpenRecoverProQt.iss') != '' }}
+        shell: pwsh
+        env:
+          DIST: ${{ github.workspace }}\dist
+          VER:  ${{ github.ref_name }}
+        run: |
+          $ver = if ($env:VER -match '^v') { $env:VER.TrimStart('v') } else { '0.0.0-ci' }
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" `
+            "/DReleaseDist=$env:DIST" "/DAppVersion=$ver" installer\OpenRecoverProQt.iss
+
+      - name: Upload artifacts (EXEs + installer if present)
+        uses: actions/upload-artifact@v4
+        with:
+          name: OpenRecover-win
+          path: |
+            dist/OpenRecoverProQt.exe
+            dist/OpenRecoverProQt_Admin.exe
+            dist/OpenRecoverProQt_Setup.exe
+          if-no-files-found: warn
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: windows-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { name: OpenRecover-win, path: ./release }
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            release/OpenRecoverProQt.exe
+            release/OpenRecoverProQt_Admin.exe
+            release/OpenRecoverProQt_Setup.exe

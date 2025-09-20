@@ -11,28 +11,36 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
-        with: { python-version: '3.12' }
+        with:
+          python-version: '3.12'
+
       - name: Install deps
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-     - name: Build EXEs (Qt UI)
-  run: |
-    pyinstaller -F -w -n OpenRecoverProQt        src/main.py --hidden-import PySide6 --hidden-import PySide6.QtCore --hidden-import PySide6.QtWidgets --hidden-import PySide6.QtGui
-    pyinstaller -F -w --uac-admin -n OpenRecoverProQt_Admin src/main.py --hidden-import PySide6 --hidden-import PySide6.QtCore --hidden-import PySide6.QtWidgets --hidden-import PySide6.QtGui
+
+      - name: Build EXEs (Qt UI)
+        run: |
+          pyinstaller -F -w -n OpenRecoverProQt src/main.py ^
+            --hidden-import PySide6 --hidden-import PySide6.QtCore --hidden-import PySide6.QtWidgets --hidden-import PySide6.QtGui
+          pyinstaller -F -w --uac-admin -n OpenRecoverProQt_Admin src/main.py ^
+            --hidden-import PySide6 --hidden-import PySide6.QtCore --hidden-import PySide6.QtWidgets --hidden-import PySide6.QtGui
 
       - name: Install Inno Setup
         run: choco install innosetup --no-progress
+
       - name: Build installer
         shell: pwsh
         env:
           DIST: ${{ github.workspace }}\dist
-          VER:  ${{ github.ref_name }}
+          VER: ${{ github.ref_name }}
         run: |
           $ver = if ($env:VER -match '^v') { $env:VER.TrimStart('v') } else { '0.0.0-ci' }
           & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" `
             "/DReleaseDist=$env:DIST" "/DAppVersion=$ver" installer\OpenRecoverProQt.iss
+
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:

@@ -1,12 +1,12 @@
-; OpenRecoverProQt.iss — CI-ready Inno script
+; CI-ready Inno script
 
-; Dist folder is provided by the workflow
-#define ReleaseDist GetEnv("ReleaseDist")
 #ifndef ReleaseDist
-  #error "Pass /DReleaseDist=<dist path> when compiling."
+  #define ReleaseDist GetEnv("ReleaseDist")
+#endif
+#if ReleaseDist == ""
+  #error "Pass /DReleaseDist=<dist path>."
 #endif
 
-; Version is passed by the workflow as /DAppVersion=<ver>
 #ifndef AppVersion
   #define AppVersion "0.0.0-ci"
 #endif
@@ -17,8 +17,8 @@
 [Setup]
 AppId={{FD1E5A8A-18C3-4D5A-B1B4-8F0E3A5E1B7C}
 AppName={#AppName}
-AppVersion={#AppVersion}               ; <- REQUIRED
-AppVerName={#AppName} {#AppVersion}    ; nice to have
+AppVersion={#AppVersion}
+AppVerName={#AppName} {#AppVersion}
 AppPublisher={#AppPublisher}
 DefaultDirName={pf}\{#AppName}
 DefaultGroupName={#AppName}
@@ -30,8 +30,8 @@ PrivilegesRequired=lowest
 WizardStyle=modern
 
 [Files]
-Source: "{#ReleaseDist}\OpenRecoverProQt.exe";        DestDir: "{app}"; Flags: ignoreversion
-Source: "{#ReleaseDist}\OpenRecoverProQt_Admin.exe";  DestDir: "{app}"; Flags: ignoreversion
+Source: "{#ReleaseDist}\OpenRecoverProQt.exe";       DestDir: "{app}"; Flags: ignoreversion
+Source: "{#ReleaseDist}\OpenRecoverProQt_Admin.exe"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
 Name: "{group}\OpenRecover Pro Qt";         Filename: "{app}\OpenRecoverProQt.exe"

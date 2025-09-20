@@ -1,5 +1,5 @@
 import sys
-from openrecover import gui_qt
+from openrecover.gui_qt import main
 
 if __name__ == "__main__":
-    gui_qt.main()
+    main()

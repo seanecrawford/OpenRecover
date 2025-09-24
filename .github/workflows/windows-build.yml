@@ -25,11 +25,18 @@ jobs:
         run: |
           Remove-Item -Recurse -Force build, dist -ErrorAction SilentlyContinue
 
-
       - name: Build EXEs (Qt UI)
         run: |
-          pyinstaller -F -w -n OpenRecoverProQt src/main.py --hidden-import PySide6 --hidden-import PySide6.QtCore --hidden-import PySide6.QtWidgets --hidden-import PySide6.QtGui
-          pyinstaller -F -w --uac-admin -n OpenRecoverProQt_Admin src/main.py --hidden-import PySide6 --hidden-import PySide6.QtCore --hidden-import PySide6.QtWidgets --hidden-import PySide6.QtGui
+          pyinstaller -F -w -n OpenRecoverProQt src/main.py `
+            --hidden-import openrecover.gui_qt `
+            --hidden-import openrecover.carver `
+            --hidden-import openrecover.signatures `
+            --hidden-import openrecover.rawio
+          pyinstaller -F -w --uac-admin -n OpenRecoverProQt_Admin src/main.py `
+            --hidden-import openrecover.gui_qt `
+            --hidden-import openrecover.carver `
+            --hidden-import openrecover.signatures `
+            --hidden-import openrecover.rawio
 
       - name: Install Inno Setup
         run: choco install innosetup --no-progress

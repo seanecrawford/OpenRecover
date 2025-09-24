@@ -4,7 +4,6 @@ from .carver import FileCarver
 from .signatures import ALL_SIGNATURES
 from .rawio import to_raw_if_drive
 
-# Stylesheet
 QSS = """
 * { font-family: 'Segoe UI','Inter','Roboto'; font-size: 10.5pt; }
 QMainWindow { background: #0F1115; }
@@ -45,11 +44,8 @@ class Worker(QtCore.QObject):
                 deduplicate=self.opts["dedup"]
             )
             carver.hit_cb = lambda r: (None if self.stop_flag.is_set() else self.hit.emit(r))
-
-            # Run scan once; stop/pause handled by flags
             if not self.stop_flag.is_set():
                 carver.scan()
-
             self.done.emit()
         except Exception as e:
             self.error.emit(str(e))
@@ -59,7 +55,6 @@ class Main(QtWidgets.QMainWindow):
         super().__init__()
         self.setWindowTitle(APP)
         self.setMinimumSize(1120,740)
-        self._speed_state={"last_c":0,"last_t":time.monotonic()}
         self.stop_flag = threading.Event()
         self.pause_flag = threading.Event()
         self._ui()
@@ -115,18 +110,18 @@ class Main(QtWidgets.QMainWindow):
         self.table=QtWidgets.QTableWidget(0,6)
         self.table.setHorizontalHeaderLabels(["type","start","length","path","ok","note"])
         self.table.horizontalHeader().setStretchLastSection(True)
+        # make table interactive
+        self.table.itemDoubleClicked.connect(self._open_file)
         vg.addWidget(self.table,1)
         root.addWidget(tbl,1)
 
     # Pickers
-    def pick_file(self):
+    def pick_file(self): 
         p=QtWidgets.QFileDialog.getOpenFileName(self,"Choose IMAGE","","Images (*.img *.dd *.bin *.raw *.iso);;All files (*.*)")[0]
         if p: self.edSrc.setText(p)
-
     def pick_drive(self):
         d=QtWidgets.QFileDialog.getExistingDirectory(self,"Choose DRIVE ROOT (E:\\ → \\\\.\\E:)"); 
         if d: self.edSrc.setText(to_raw_if_drive(d))
-
     def pick_out(self):
         p=QtWidgets.QFileDialog.getExistingDirectory(self,"Choose output folder"); 
         if p: self.edOut.setText(p)
@@ -190,9 +185,10 @@ class Main(QtWidgets.QMainWindow):
     @QtCore.Slot(str)
     def _on_err(self,msg): QtWidgets.QMessageBox.critical(self,"Error",msg)
 
-# Entry point
-def main():
-    app = QtWidgets.QApplication(sys.argv)
-    app.setStyleSheet(QSS)
-    w = Main(); w.show()
-    sys.exit(app.exec())
+    def _open_file(self, item):
+        row = item.row()
+        path = self.table.item(row,3).text()
+        if path and os.path.exists(path):
+            if os.name=="nt":
+                os.startfile(path)
+            else:

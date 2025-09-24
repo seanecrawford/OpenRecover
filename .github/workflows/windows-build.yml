@@ -21,6 +21,10 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      - name: Clean old build
+        run: |
+          rmdir /s /q build dist || echo "no old build"
+
       - name: Build EXEs (Qt UI)
         run: |
           pyinstaller -F -w -n OpenRecoverProQt src/main.py --hidden-import PySide6 --hidden-import PySide6.QtCore --hidden-import PySide6.QtWidgets --hidden-import PySide6.QtGui

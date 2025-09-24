@@ -4,6 +4,7 @@ from .carver import FileCarver
 from .signatures import ALL_SIGNATURES
 from .rawio import to_raw_if_drive
 
+# Stylesheet
 QSS = """
 * { font-family: 'Segoe UI','Inter','Roboto'; font-size: 10.5pt; }
 QMainWindow { background: #0F1115; }
@@ -40,17 +41,15 @@ class Worker(QtCore.QObject):
                 chunk=self.opts["chunk"], overlap=self.opts["overlap"],
                 max_files=self.opts["max_files"], fast_index=self.opts["fast_index"],
                 max_bytes=self.opts["max_bytes"], min_size=self.opts["min_size"],
-                progress_cb=lambda c,t: self.progress.emit(c,t),
+                progress_cb=lambda c,t: (None if self.stop_flag.is_set() else self.progress.emit(c,t)),
                 deduplicate=self.opts["dedup"]
             )
-            carver.hit_cb = lambda r: self.hit.emit(r)
+            carver.hit_cb = lambda r: (None if self.stop_flag.is_set() else self.hit.emit(r))
 
-            # wrap scan loop with stop/pause support
-            for _ in carver.scan():
-                if self.stop_flag.is_set():
-                    break
-                while self.pause_flag.is_set():
-                    time.sleep(0.2)
+            # Run scan once; stop/pause handled by flags
+            if not self.stop_flag.is_set():
+                carver.scan()
+
             self.done.emit()
         except Exception as e:
             self.error.emit(str(e))
@@ -69,7 +68,7 @@ class Main(QtWidgets.QMainWindow):
         cw = QtWidgets.QWidget(); self.setCentralWidget(cw)
         root = QtWidgets.QVBoxLayout(cw)
 
-        # Sprig branding
+        # Branding: Sprig
         header = QtWidgets.QHBoxLayout()
         text = QtWidgets.QLabel("Sprig")
         text.setStyleSheet("color: #00FF7F; font-size: 18pt; font-weight: bold;")
@@ -120,12 +119,14 @@ class Main(QtWidgets.QMainWindow):
         root.addWidget(tbl,1)
 
     # Pickers
-    def pick_file(self): 
+    def pick_file(self):
         p=QtWidgets.QFileDialog.getOpenFileName(self,"Choose IMAGE","","Images (*.img *.dd *.bin *.raw *.iso);;All files (*.*)")[0]
         if p: self.edSrc.setText(p)
+
     def pick_drive(self):
         d=QtWidgets.QFileDialog.getExistingDirectory(self,"Choose DRIVE ROOT (E:\\ → \\\\.\\E:)"); 
         if d: self.edSrc.setText(to_raw_if_drive(d))
+
     def pick_out(self):
         p=QtWidgets.QFileDialog.getExistingDirectory(self,"Choose output folder"); 
         if p: self.edOut.setText(p)
@@ -148,6 +149,7 @@ class Main(QtWidgets.QMainWindow):
         self.worker.progress.connect(self._on_prog); self.worker.hit.connect(self._on_hit)
         self.worker.done.connect(self._on_done); self.worker.error.connect(self._on_err)
         self.thread.start()
+
     def pause_scan(self):
         if not self.pause_flag.is_set():
             self.pause_flag.set(); self.lbl.setText("Paused")
@@ -155,6 +157,7 @@ class Main(QtWidgets.QMainWindow):
         else:
             self.pause_flag.clear(); self.lbl.setText("Resumed")
             self.btnPause.setText("Pause")
+
     def stop_scan(self):
         self.stop_flag.set(); self.lbl.setText("Stopping...")
 

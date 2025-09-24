@@ -1,4 +1,4 @@
-import os, hashlib
+import os, hashlib, re
 from typing import List, Optional, Set
 from .signatures import FileSignature, ALL_SIGNATURES
 from .rawio import RawDevice, to_raw_if_drive
@@ -8,6 +8,10 @@ class CarveResult:
         self.start=start; self.end=end; self.sig=sig
         self.out_path=out_path; self.sha256=sha256
         self.ok=ok; self.note=note
+
+# helper: sanitize filenames for Windows/Linux
+def _safe_name(s: str) -> str:
+    return re.sub(r'[^a-zA-Z0-9_.@-]', '_', s)
 
 class Reader:
     def __init__(self, source:str):
@@ -57,27 +61,22 @@ class FileCarver:
         os.makedirs(self.output_dir,exist_ok=True)
 
     def _out(self,sig,start,length)->str:
-        d=os.path.join(self.output_dir,sig.name); os.makedirs(d,exist_ok=True)
-        return os.path.join(d,f"{sig.name}_@{start}_len{length}{sig.extensions[0]}")
-
-    def _find_footer(self,r,start,footer,max_size)->Optional[int]:
-        r.seek(start); scanned=0; tail=b""; CH=1024*1024
-        while scanned<max_size:
-            buf=r.read(CH); 
-            if not buf: break
-            data=tail+buf; idx=data.find(footer)
-            if idx!=-1: return start+(len(tail)+idx)+len(footer)
-            tail=data[-min(len(footer)-1,len(data)):] if len(footer)>1 else b""; scanned+=len(buf)
-        return None
+        d=os.path.join(self.output_dir,sig.name)
+        os.makedirs(d,exist_ok=True)
+        fname=_safe_name(f"{sig.name}_@{start}_len{length}{sig.extensions[0]}")
+        return os.path.join(d,fname)
 
     def _stream(self,r,start,total,outp):
         r.seek(start); remain=total; h=hashlib.sha256()
         try:
             with open(outp,"wb") as w:
                 while remain>0:
-                    b=r.read(min(2*1024*1024,remain))
+                    b=r.read(min(1024*1024,remain))  # smaller increments
                     if not b: return False,"","truncated"
                     w.write(b); h.update(b); remain-=len(b)
+                    # smoother progress callback
+                    if self.progress_cb:
+                        self.progress_cb(r._pos, getattr(r,"length",0))
         except Exception as e:
             return False,"",f"write error: {e}"
         return True,h.hexdigest(),""
@@ -89,9 +88,6 @@ class FileCarver:
         if sig.size_from_header:
             try: size=sig.size_from_header(r,start)
             except Exception: size=None
-        if size is None and sig.footer:
-            end=self._find_footer(r,start,sig.footer,min(sig.max_size,self.max_bytes or sig.max_size))
-            if end: size=end-start
         if size is None or size<self.min_size or size>sig.max_size: return None
         outp=self._out(sig,start,size)
         if self.fast_index: return CarveResult(start,start+size,sig,outp,"",True,"indexed")
@@ -120,8 +116,7 @@ class FileCarver:
                         idx=data.find(sig.header,i)
                         if idx==-1: break
                         r2=self._from_hdr(r, abs_off - len(tail) + idx, sig)
-                        if r2:
-                            if self.hit_cb: self.hit_cb(r2)   # emit hit as soon as found
+                        if r2 and self.hit_cb: self.hit_cb(r2)
                         i=idx+1
                 tail=data[-min(self.ov,len(data)):]
                 abs_off+=len(buf)

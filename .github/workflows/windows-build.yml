@@ -23,7 +23,8 @@ jobs:
 
       - name: Clean old build
         run: |
-          rmdir /s /q build dist || echo "no old build"
+          Remove-Item -Recurse -Force build, dist -ErrorAction SilentlyContinue
+
 
       - name: Build EXEs (Qt UI)
         run: |

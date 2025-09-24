@@ -22,7 +22,7 @@ QTableWidget { gridline-color: #232733; selection-background-color: #3B82F6; }
 
 APP = "OpenRecover Pro v0.7 (Qt)"
 
-# Simple preview helper
+# Preview helper
 def show_preview(path: str):
     ext = os.path.splitext(path)[1].lower()
     if ext in (".jpg",".jpeg",".png",".heic",".heif"):
@@ -82,6 +82,20 @@ class Main(QtWidgets.QMainWindow):
         cw = QtWidgets.QWidget(); self.setCentralWidget(cw)
         root = QtWidgets.QVBoxLayout(cw)
 
+        # Branding header with Sprig logo + text
+        header = QtWidgets.QHBoxLayout()
+        logo = QtWidgets.QLabel()
+        logo_path = os.path.join(os.path.dirname(__file__), "assets", "spriglogo.png")
+        pix = QtGui.QPixmap(logo_path)
+        if not pix.isNull():
+            logo.setPixmap(pix.scaled(32,32, QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation))
+        text = QtWidgets.QLabel("Sprig")
+        text.setStyleSheet("color: #00FF7F; font-size: 18pt; font-weight: bold; margin-left: 8px;")
+        header.addWidget(logo)
+        header.addWidget(text)
+        header.addStretch()
+        root.addLayout(header)
+
         # Top panel: source + output
         top = QtWidgets.QFrame(objectName="Card")
         g = QtWidgets.QGridLayout(top)
@@ -122,7 +136,7 @@ class Main(QtWidgets.QMainWindow):
         vg.addWidget(self.table,1)
         root.addWidget(tbl,1)
 
-    # File/Drive pickers
+    # Pickers
     def pick_file(self):
         p=QtWidgets.QFileDialog.getOpenFileName(self,"Choose IMAGE","","Images (*.img *.dd *.bin *.raw *.iso);;All files (*.*)")[0]
         if p: self.edSrc.setText(p)

@@ -59,3 +59,9 @@ class Main(QtWidgets.QMainWindow):
             path=self.table.item(row,3).text()
             if path and os.path.exists(path):
                 show_preview(path)
+def main():
+    app = QtWidgets.QApplication(sys.argv)
+    app.setStyleSheet(QSS)
+    w = Main()
+    w.show()
+    sys.exit(app.exec())

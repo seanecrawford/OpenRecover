@@ -9,7 +9,7 @@ class CarveResult:
         self.out_path=out_path; self.sha256=sha256
         self.ok=ok; self.note=note
 
-# helper: sanitize filenames for Windows/Linux
+# helper: sanitize filenames
 def _safe_name(s: str) -> str:
     return re.sub(r'[^a-zA-Z0-9_.@-]', '_', s)
 
@@ -67,19 +67,24 @@ class FileCarver:
         return os.path.join(d,fname)
 
     def _stream(self,r,start,total,outp):
-        r.seek(start); remain=total; h=hashlib.sha256()
+        r.seek(start)
+        remain=total
+        h=hashlib.sha256()
         try:
             with open(outp,"wb") as w:
                 while remain>0:
-                    b=r.read(min(1024*1024,remain))  # smaller increments
-                    if not b: return False,"","truncated"
-                    w.write(b); h.update(b); remain-=len(b)
-                    # smoother progress callback
+                    b=r.read(min(1024*1024,remain))
+                    if not b: break
+                    w.write(b)
+                    h.update(b)
+                    remain-=len(b)
                     if self.progress_cb:
                         self.progress_cb(r._pos, getattr(r,"length",0))
+            if remain>0:
+                return False,"","truncated"
+            return True,h.hexdigest(),""
         except Exception as e:
-            return False,"",f"write error: {e}"
-        return True,h.hexdigest(),""
+            return False,"",f"write error: {str(e)}"
 
     def _from_hdr(self,r,hdr,sig):
         start=hdr - sig.header_adjust

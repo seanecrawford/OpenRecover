@@ -9,6 +9,7 @@ on:
 jobs:
   build:
     runs-on: windows-latest
+
     steps:
       - uses: actions/checkout@v4
 
@@ -20,43 +21,40 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
+          pip install pyinstaller
 
       - name: Clean old build
+        shell: pwsh
         run: |
-          Remove-Item -Recurse -Force build, dist -ErrorAction SilentlyContinue
+          if (Test-Path dist)  { Remove-Item -Recurse -Force dist }
+          if (Test-Path build) { Remove-Item -Recurse -Force build }
 
-      - name: Build EXEs (Qt UI)
+      - name: Build EXE (single Admin build)
+        shell: pwsh
         run: |
-          pyinstaller -F -w -n OpenRecoverProQt src/main.py `
+          pyinstaller -F -w -n SprigOpenRecover `
+            --uac-admin `
+            --paths src `
             --hidden-import openrecover.gui_qt `
             --hidden-import openrecover.carver `
+            --hidden-import openrecover.rawio `
             --hidden-import openrecover.signatures `
-            --hidden-import openrecover.rawio
-          pyinstaller -F -w --uac-admin -n OpenRecoverProQt_Admin src/main.py `
-            --hidden-import openrecover.gui_qt `
-            --hidden-import openrecover.carver `
-            --hidden-import openrecover.signatures `
-            --hidden-import openrecover.rawio
+            --collect-all PySide6 `
+            src/main.py
 
       - name: Install Inno Setup
+        shell: pwsh
         run: choco install innosetup --no-progress
 
       - name: Build installer
         shell: pwsh
-        env:
-          DIST: ${{ github.workspace }}\dist
-          VER: ${{ github.ref_name }}
         run: |
-          $ver = if ($env:VER -match '^v') { $env:VER.TrimStart('v') } else { '0.0.0-ci' }
-          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" `
-            "/DReleaseDist=$env:DIST" "/DAppVersion=$ver" installer\OpenRecoverProQt.iss
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer\OpenRecoverProQt.iss
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: OpenRecover-win
+          name: SprigOpenRecover_Windows
           path: |
-            dist/OpenRecoverProQt.exe
-            dist/OpenRecoverProQt_Admin.exe
-            dist/OpenRecoverProQt_Setup.exe
-          if-no-files-found: error
+            dist\SprigOpenRecover.exe
+            installer\Output\*.exe

@@ -1,29 +1,36 @@
-#define MyAppName "Sprig OpenRecover"
-#define MyAppVersion "0.7.0"
+#define AppName      "Sprig OpenRecover"
+#ifndef AppVersion
+  #define AppVersion "0.7-ci"
+#endif
+
+#ifndef ReleaseDist
+  #error "Pass /DReleaseDist=""<dist path>"" (points to folder containing SprigOpenRecover.exe)."
+#endif
 
 [Setup]
-AppId={{F1DE5ABA-1BC3-4D3A-B1B4-8F0E3A5E1B7C}
-AppName={#MyAppName}
-AppVersion={#MyAppVersion}
-DefaultDirName={pf}\{#MyAppName}
-DefaultGroupName={#MyAppName}
-OutputDir=installer\Output
-OutputBaseFilename={#MyAppName}_Setup
+AppId={{F1DE5A8A-1BC3-4D5A-B1B4-8F0E3A8E1B7C}
+AppName={#AppName}
+AppVersion={#AppVersion}
+AppPublisher="OpenRecover Project"
+DefaultDirName={autopf}\{#AppName}
+DefaultGroupName={#AppName}
+OutputBaseFilename=SprigOpenRecover_Setup
 Compression=lzma
 SolidCompression=yes
-WizardStyle=modern
 PrivilegesRequired=admin
 ArchitecturesInstallIn64BitMode=x64
+WizardStyle=modern
 
 [Files]
-Source: "dist\SprigOpenRecover.exe"; DestDir: "{app}"; Flags: ignoreversion
+; This is the EXE we copied there in the workflow
+Source: "{#ReleaseDist}\SprigOpenRecover.exe"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
-Name: "{group}\{#MyAppName}"; Filename: "{app}\SprigOpenRecover.exe"
-Name: "{commondesktop}\{#MyAppName}"; Filename: "{app}\SprigOpenRecover.exe"; Tasks: desktopicon
+Name: "{group}\{#AppName}"; Filename: "{app}\SprigOpenRecover.exe"
+Name: "{commondesktop}\{#AppName}"; Filename: "{app}\SprigOpenRecover.exe"; Tasks: desktopicon
 
 [Tasks]
-Name: "desktopicon"; Description: "Create a &desktop icon"; Flags: unchecked
+Name: "desktopicon"; Description: "Create &desktop shortcut"; Flags: unchecked
 
 [Run]
-Filename: "{app}\SprigOpenRecover.exe"; Description: "Launch {#MyAppName}"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\SprigOpenRecover.exe"; Flags: nowait postinstall skipifsilent

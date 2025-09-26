@@ -1,1 +1,4 @@
-PySide6>=6.7
+# Build-time/runtime deps for packaging the Qt app
+PySide6==6.7.2
+pyinstaller==6.6.0
+pyinstaller-hooks-contrib>=2024.8

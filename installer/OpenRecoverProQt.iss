@@ -1,33 +1,41 @@
-; ===== OpenRecover / SprigOpenRecover Installer =====
+; -------- Inno Setup script for SprigOpenRecover --------
+; Pass from CI:
+;   iscc installer\OpenRecoverProQt.iss /DReleaseDist="<abs-path-to-dist>" /DAppVer="1234"
 
-#define AppName    GetString(DocString("AppName"),    "SprigOpenRecover")
-#define AppVersion GetString(DocString("AppVersion"), "0.0.0")
-#define ReleaseDist GetString(DocString("ReleaseDist"), "..\\dist")
+#ifndef ReleaseDist
+  #error "ReleaseDist not set. Pass /DReleaseDist=""<abs path to dist>"""
+#endif
+
+#ifndef AppVer
+  #define AppVer "0.7"
+#endif
+
+#define AppName      "SprigOpenRecover"
+#define AppPublisher "Sprig Labs"
 
 [Setup]
-AppId={{EFA72C94-76D9-4B3A-8E3C-64AA44C0F889}}
+AppId={{E6B7A97E-3F08-4C33-9E3E-4C8C1D0B9F8D}
 AppName={#AppName}
-AppVersion={#AppVersion}
-AppPublisher=OpenRecover Project
+AppVersion={#AppVer}
+AppPublisher={#AppPublisher}
 DefaultDirName={pf}\{#AppName}
 DefaultGroupName={#AppName}
-DisableProgramGroupPage=yes
-OutputDir=installer\output
-OutputBaseFilename={#AppName}_Setup
+OutputDir=installer\Output
+OutputBaseFilename={#AppName}_Setup_{#AppVer}
 Compression=lzma
 SolidCompression=yes
 PrivilegesRequired=admin
 WizardStyle=modern
 
 [Files]
-Source: "{#ReleaseDist}\{#AppName}.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#ReleaseDist}\SprigOpenRecover.exe"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
-Name: "{group}\{#AppName}";           Filename: "{app}\{#AppName}.exe"
-Name: "{commondesktop}\{#AppName}";  Filename: "{app}\{#AppName}.exe"; Tasks: desktopicon
+Name: "{group}\{#AppName}";               Filename: "{app}\SprigOpenRecover.exe"
+Name: "{commondesktop}\{#AppName}";       Filename: "{app}\SprigOpenRecover.exe"; Tasks: desktopicon
 
 [Tasks]
-Name: "desktopicon"; Description: "Create a desktop icon"; Flags: unchecked
+Name: "desktopicon"; Description: "Create a &Desktop icon"; Flags: unchecked
 
 [Run]
-Filename: "{app}\{#AppName}.exe"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\SprigOpenRecover.exe"; Flags: nowait postinstall skipifsilent

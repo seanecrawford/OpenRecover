@@ -1,372 +1,371 @@
-import os, sys, time, threading
-from typing import Optional, List
-from PySide6 import QtCore, QtGui, QtWidgets
+from __future__ import annotations
+import os, time, threading, math, traceback
+from typing import Optional
 
-from .carver import FileCarver, CarveResult
+# ---- Qt imports (kept explicit so PyInstaller sees them) ----
+from PySide6.QtCore import Qt, Signal, Slot, QObject, QThread, QTimer
+from PySide6.QtGui import QPixmap
+from PySide6.QtWidgets import (
+    QApplication, QMainWindow, QWidget, QLabel, QLineEdit, QPushButton,
+    QFileDialog, QCheckBox, QSpinBox, QProgressBar, QTableWidget,
+    QTableWidgetItem, QGridLayout, QHBoxLayout, QVBoxLayout, QMessageBox
+)
+
+# ---- Your engines ----
+from .carver import FileCarver
 from .signatures import ALL_SIGNATURES
-from .rawio import to_raw_if_drive, RawDevice
+from .rawio import to_raw_if_drive
 
-APP_TITLE = "OpenRecover Pro v0.7 (Qt)"
-GREEN = "#4ade80"
+# ---- assets ----
+# PyInstaller-friendly way: we pass --add-data at build time so this path exists.
+_ASSET_DIR = os.path.join(os.path.dirname(__file__), "assets")
+_LOGO = os.path.join(_ASSET_DIR, "spriglogo.png")
 
-def _asset_path(name: str) -> str:
-    """
-    Resolve asset in both source and frozen EXE.
-    """
-    base = getattr(sys, "_MEIPASS", os.path.dirname(__file__))
-    # When frozen, openrecover/* is unpacked under _MEIPASS
-    # When running from source, this module sits in src/openrecover/
-    p1 = os.path.join(base, "openrecover", "assets", name)
-    p2 = os.path.join(base, "assets", name)
-    return p1 if os.path.exists(p1) else p2
-
-QSS = f"""
-* {{ font-family:'Segoe UI','Inter','Roboto'; font-size: 10.5pt; }}
-QMainWindow {{ background:#0F1115; }}
-QWidget     {{ color:#E6E9EF; background:#0F1115; }}
-QFrame#Card {{ background:#171A21; border:1px solid #232733; border-radius:12px; }}
-QPushButton {{ background:#232733; border:1px solid #2F3542; border-radius:8px; padding:6px 10px; }}
-QPushButton:hover {{ background:#2A3140; }}
-QPushButton#Primary {{ background:qlineargradient(x1:0,y1:0,x2:1,y2:1,stop:0 #3B82F6,stop:1 #22D3EE); border:none; color:white; font-weight:600; }}
-QLineEdit   {{ background:#0B0D11; border:1px solid #2A3040; border-radius:6px; padding:6px 8px; }}
-QSpinBox    {{ background:#0B0D11; border:1px solid #2A3040; border-radius:6px; padding:6px 8px; color:#E6E9EF; }}
-QProgressBar {{ border:1px solid #2A3040; border-radius:8px; background:#0B0D11; text-align:center; color:#AAB1BD; }}
-QProgressBar::chunk {{ background:qlineargradient(x1:0,y1:0,x2:1,y2:0,stop:0 #22D3EE,stop:1 #3B82F6); border-radius:8px; }}
-QHeaderView::section {{ background:#171A21; border:1px solid #232733; padding:6px; }}
-QTableWidget {{ gridline-color:#232733; selection-background-color:#3B82F6; }}
+APP_NAME = "Sprig OpenRecover"
+QSS = """
+*{font-family: 'Segoe UI','Inter','Roboto'; font-size:10.5pt;}
+QMainWindow{background:#0F1115;}
+QWidget{color:#E6E9EF;background:#0F1115;}
+QLabel#Brand{color:#7BF79E;font-weight:700;font-size:18pt;}
+QFrame#Card{background:#171A21;border:1px solid #232733;border-radius:12px;}
+QLineEdit{background:#0B0D11;border:1px solid #2A3040;border-radius:6px;padding:6px;}
+QPushButton{background:#232733;border:1px solid #2F3542;border-radius:8px;padding:8px 14px;}
+QPushButton:disabled{opacity:.5;}
+QPushButton#Primary{background:qlineargradient(x1:0,y1:0,x2:1,y2:0,stop:0 #22D3EE,stop:1 #3B82F6);border:none;color:white;font-weight:600;}
+QProgressBar{border:1px solid #2A3040;border-radius:8px;background:#0B0D11;text-align:center;color:#AAB1BD;height:18px;}
+QProgressBar::chunk{background:qlineargradient(x1:0,y1:0,x2:1,y2:0,stop:0 #22D3EE,stop:1 #3B82F6);border-radius:8px;}
+QHeaderView::section{background:#171A21;border:1px solid #232733;padding:6px;}
+QTableWidget{gridline-color:#232733;selection-background-color:#3B82F6;}
 """
 
-class ScanWorker(QtCore.QObject):
-    progress = QtCore.Signal(int, int)             # cur, total
-    item     = QtCore.Signal(object)               # CarveResult
-    done     = QtCore.Signal()
-    error    = QtCore.Signal(str)
+# ---------------- Worker ---------------- #
+class Worker(QObject):
+    progress = Signal(int, int)      # current, total (bytes)
+    found    = Signal(object)        # result object from FileCarver
+    status   = Signal(str)           # short status text
+    error    = Signal(str)
+    done     = Signal()
 
-    def __init__(self, src: str, out: str, opts: dict):
+    def __init__(self, src:str, out:str, opts:dict):
         super().__init__()
-        self.src = src; self.out = out; self.opts = opts
-        self._stop = False
-        self._pause = False
+        self.src = src
+        self.out = out
+        self.opts = opts
+        self._pause = threading.Event()
+        self._stop  = threading.Event()
+        self._pause.clear()
+        self._stop.clear()
 
-    @QtCore.Slot()
+    @Slot()
     def run(self):
         try:
-            def stopf(): return self._stop
-            def pausef(): return self._pause
+            self.status.emit("Initializing...")
             c = FileCarver(
                 self.src, self.out, ALL_SIGNATURES,
                 chunk=self.opts["chunk"],
                 overlap=self.opts["overlap"],
                 max_files=self.opts["max_files"],
-                fast_index=False,
+                fast_index=self.opts["fast_index"],
                 max_bytes=self.opts["max_bytes"],
                 min_size=self.opts["min_size"],
-                start_offset=self.opts["start"],
-                deduplicate=self.opts["dedup"],
-                progress_cb=lambda a,b: self.progress.emit(int(a), int(b)),
-                stop_flag=stopf,
-                pause_flag=pausef,
+                progress_cb=lambda cur, total: self.progress.emit(int(cur), int(total)),
+                deduplicate=self.opts["dedup"]
             )
+            self.status.emit("Scanning...")
             for r in c.scan():
-                self.item.emit(r)
-                if self._stop:
+                if self._stop.is_set():
+                    self.status.emit("Stopped")
                     break
-            c.close()
+                while self._pause.is_set():
+                    time.sleep(0.05)
+                self.found.emit(r)
             self.done.emit()
         except Exception as e:
-            self.error.emit(str(e))
+            self.error.emit(traceback.format_exc())
 
-    def stop(self):  self._stop  = True
-    def pause(self): self._pause = True
-    def resume(self): self._pause = False
+    # control
+    def pause(self, yes:bool): self._pause.set() if yes else self._pause.clear()
+    def stop(self): self._stop.set()
 
-class ImageWorker(QtCore.QObject):
-    progress = QtCore.Signal(int, int)
-    done     = QtCore.Signal(str)
-    error    = QtCore.Signal(str)
 
-    def __init__(self, src: str, out_img: str):
-        super().__init__()
-        self.src = src
-        self.out_img = out_img
-        self._stop = False
-
-    @QtCore.Slot()
-    def run(self):
-        try:
-            src = self.src.strip()
-            src = to_raw_if_drive(src)
-            total = 0
-            if os.name=="nt" and src.startswith(r"\\.\\".rstrip("\\")):
-                dev = RawDevice(src, 4096)
-                length = dev.length or 0
-                with open(self.out_img, "wb") as fo:
-                    pos = 0
-                    bs_list = [1024*1024, 256*1024, 64*1024, 4096]
-                    while not self._stop:
-                        data = b""
-                        ok = False
-                        for b in bs_list:
-                            try:
-                                data = dev.read_at(pos, b)
-                                ok = True; break
-                            except Exception:
-                                ok = False; continue
-                        if not ok or not data:
-                            break
-                        fo.write(data); pos += len(data); total += len(data)
-                        self.progress.emit(int(total), int(length))
-                dev.close()
-            else:
-                with open(src, "rb") as fi, open(self.out_img, "wb") as fo:
-                    fi.seek(0, os.SEEK_END); length = fi.tell(); fi.seek(0)
-                    while not self._stop:
-                        data = fi.read(1024*1024)
-                        if not data: break
-                        fo.write(data); total += len(data)
-                        self.progress.emit(int(total), int(length))
-            self.done.emit(self.out_img)
-        except Exception as e:
-            self.error.emit(str(e))
-
-    def stop(self): self._stop = True
-
-class Main(QtWidgets.QMainWindow):
+# ---------------- UI ---------------- #
+class Main(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle(APP_TITLE)
-        self.setMinimumSize(1120, 740)
-        self._ui()
-        self._thread = None
-        self._worker = None
+        self.setWindowTitle(f"{APP_NAME} v0.7 (Qt)")
+        self.setMinimumSize(1000, 620)
+        self._build_ui()
+        self._wire()
+        self._reset_state()
 
-    def _ui(self):
-        self.setStyleSheet(QSS)
-        cw = QtWidgets.QWidget(); self.setCentralWidget(cw)
-        v = QtWidgets.QVBoxLayout(cw); v.setContentsMargins(10,10,10,10); v.setSpacing(10)
+    def _build_ui(self):
+        root = QWidget(self)
+        self.setCentralWidget(root)
+        outer = QVBoxLayout(root); outer.setContentsMargins(12,12,12,12); outer.setSpacing(10)
 
-        # Header w/ logo
-        topbar = QtWidgets.QHBoxLayout(); v.addLayout(topbar)
-        logo_path = _asset_path("spriglogo.png")
-        if os.path.exists(logo_path):
-            pm = QtGui.QPixmap(logo_path)
-            lbl_logo = QtWidgets.QLabel(); lbl_logo.setPixmap(pm.scaledToHeight(26, QtCore.Qt.SmoothTransformation))
-            topbar.addWidget(lbl_logo, 0, QtCore.Qt.AlignLeft|QtCore.Qt.AlignVCenter)
-        title = QtWidgets.QLabel("Sprig")
-        title.setStyleSheet(f"color:{GREEN}; font-size:18pt; font-weight:700; margin-left:8px;")
-        topbar.addWidget(title, 0, QtCore.Qt.AlignLeft)
-        topbar.addStretch(1)
+        # Brand row
+        brand_row = QHBoxLayout()
+        if os.path.exists(_LOGO):
+            logo = QLabel(); pix = QPixmap(_LOGO)
+            if not pix.isNull():
+                logo.setPixmap(pix.scaledToHeight(28, Qt.SmoothTransformation))
+                brand_row.addWidget(logo)
+        self.lblBrand = QLabel(" Sprig", objectName="Brand")
+        brand_row.addWidget(self.lblBrand)
+        brand_row.addStretch(1)
+        outer.addLayout(brand_row)
 
-        # Card: source/output
-        card1 = QtWidgets.QFrame(objectName="Card"); v.addWidget(card1)
-        g1 = QtWidgets.QGridLayout(card1); g1.setContentsMargins(12,12,12,12); g1.setHorizontalSpacing(10)
-        self.edSrc = QtWidgets.QLineEdit()
-        self.edOut = QtWidgets.QLineEdit()
-        btnFile = QtWidgets.QPushButton("File…")
-        btnDrive= QtWidgets.QPushButton("Drive…")
-        btnOut  = QtWidgets.QPushButton("Browse")
-        btnFile.clicked.connect(self._pick_file)
-        btnDrive.clicked.connect(self._pick_drive)
-        btnOut.clicked.connect(self._pick_out)
+        # Source / Output row
+        io_card = QWidget(objectName="Card")
+        io = QGridLayout(io_card); io.setContentsMargins(12,12,12,12)
+        self.edSrc = QLineEdit(); self.edOut = QLineEdit()
+        self.btnFile = QPushButton("File…"); self.btnDrive = QPushButton("Drive…"); self.btnOut = QPushButton("Browse")
+        r=0
+        io.addWidget(QLabel("Source"), r,0); io.addWidget(self.edSrc, r,1,1,3); io.addWidget(self.btnFile, r,4); io.addWidget(self.btnDrive, r,5)
+        r=1
+        io.addWidget(QLabel("Output"), r,0); io.addWidget(self.edOut, r,1,1,3);  io.addWidget(self.btnOut,  r,4)
+        outer.addWidget(io_card)
 
-        g1.addWidget(QtWidgets.QLabel("Source"),0,0); g1.addWidget(self.edSrc,0,1,1,3); g1.addWidget(btnFile,0,4); g1.addWidget(btnDrive,0,5)
-        g1.addWidget(QtWidgets.QLabel("Output"),1,0); g1.addWidget(self.edOut,1,1,1,3); g1.addWidget(btnOut,1,4)
+        # Options & actions
+        opt_card = QWidget(objectName="Card"); opt = QGridLayout(opt_card); opt.setContentsMargins(12,12,12,12)
+        self.edChunk = QLineEdit("16M"); self.edOverlap = QLineEdit("256K")
+        self.edMaxBytes = QLineEdit("0"); self.edMinSize = QLineEdit("256")
+        self.spMaxFiles = QSpinBox(); self.spMaxFiles.setRange(0, 10_000_000); self.spMaxFiles.setValue(0)
+        self.ckFast = QCheckBox("Fast index"); self.ckAllow = QCheckBox("Allow same-disk (unsafe)")
+        self.ckDedup = QCheckBox("Deduplicate"); self.ckDedup.setChecked(True)
+        self.btnImage = QPushButton("Create Image…"); self.btnStart = QPushButton("Start Scan", objectName="Primary")
+        self.btnPause = QPushButton("Pause"); self.btnStop = QPushButton("Stop"); self.btnPause.setEnabled(False); self.btnStop.setEnabled(False)
 
-        # Card: options + actions
-        card2 = QtWidgets.QFrame(objectName="Card"); v.addWidget(card2)
-        g2 = QtWidgets.QGridLayout(card2); g2.setContentsMargins(12,12,12,12)
-        self.edChunk = QtWidgets.QLineEdit("16M")
-        self.edOv    = QtWidgets.QLineEdit("256K")
-        self.edMaxB  = QtWidgets.QLineEdit("0")
-        self.edMin   = QtWidgets.QLineEdit("256")
-        self.spMax   = QtWidgets.QSpinBox(); self.spMax.setRange(0, 10_000_000); self.spMax.setValue(0)
-        self.ckFast  = QtWidgets.QCheckBox("Fast index"); self.ckFast.setChecked(False)
-        self.ckSame  = QtWidgets.QCheckBox("Allow same-disk (unsafe)")
-        self.ckDedup = QtWidgets.QCheckBox("Deduplicate"); self.ckDedup.setChecked(True)
-
-        g2.addWidget(QtWidgets.QLabel("Chunk"),0,0); g2.addWidget(self.edChunk,0,1)
-        g2.addWidget(QtWidgets.QLabel("Overlap"),0,2); g2.addWidget(self.edOv,0,3)
-        g2.addWidget(QtWidgets.QLabel("Max bytes"),0,4); g2.addWidget(self.edMaxB,0,5)
-        g2.addWidget(QtWidgets.QLabel("Min size"),0,6); g2.addWidget(self.edMin,0,7)
-        g2.addWidget(QtWidgets.QLabel("Max files"),0,8); g2.addWidget(self.spMax,0,9)
-        g2.addWidget(self.ckFast,1,0,1,2); g2.addWidget(self.ckSame,1,2,1,3); g2.addWidget(self.ckDedup,1,5,1,2)
-
-        self.btnImage = QtWidgets.QPushButton("Create Image…")
-        self.btnStart = QtWidgets.QPushButton("Start Scan"); self.btnStart.setObjectName("Primary")
-        self.btnPause = QtWidgets.QPushButton("Pause")
-        self.btnStop  = QtWidgets.QPushButton("Stop")
-        g2.addWidget(self.btnImage,1,8); g2.addWidget(self.btnStart,1,9); g2.addWidget(self.btnPause,1,10); g2.addWidget(self.btnStop,1,11)
-
-        self.btnImage.clicked.connect(self._create_image)
-        self.btnStart.clicked.connect(self._start)
-        self.btnPause.clicked.connect(self._pause_resume)
-        self.btnStop.clicked.connect(self._stop)
+        c = 0
+        opt.addWidget(QLabel("Chunk"),       0,c); c+=1; opt.addWidget(self.edChunk, 0,c); c+=1
+        opt.addWidget(QLabel("Overlap"),     0,c); c+=1; opt.addWidget(self.edOverlap,0,c); c+=1
+        opt.addWidget(QLabel("Max bytes"),   0,c); c+=1; opt.addWidget(self.edMaxBytes,0,c); c+=1
+        opt.addWidget(QLabel("Min size"),    0,c); c+=1; opt.addWidget(self.edMinSize,0,c);  c+=1
+        opt.addWidget(QLabel("Max files"),   0,c); c+=1; opt.addWidget(self.spMaxFiles,0,c); c+=1
+        opt.addWidget(self.ckFast, 1,0,1,2); opt.addWidget(self.ckAllow,1,2,1,3); opt.addWidget(self.ckDedup,1,5,1,2)
+        opt.addWidget(self.btnImage,2,5); opt.addWidget(self.btnStart,2,6); opt.addWidget(self.btnPause,2,7); opt.addWidget(self.btnStop,2,8)
+        outer.addWidget(opt_card)
 
         # Progress
-        self.pb = QtWidgets.QProgressBar(); self.pb.setRange(0, 1); self.pb.setValue(0)
-        v.addWidget(self.pb)
-        self.lbl = QtWidgets.QLabel("Idle"); v.addWidget(self.lbl)
+        self.pb = QProgressBar(); self.pb.setMinimum(0); self.pb.setMaximum(1)
+        outer.addWidget(self.pb)
 
         # Table
-        self.tbl = QtWidgets.QTableWidget(0, 6)
+        self.tbl = QTableWidget(0, 6)
         self.tbl.setHorizontalHeaderLabels(["type","start","length","path","ok","note"])
         self.tbl.horizontalHeader().setStretchLastSection(True)
-        self.tbl.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
-        self.tbl.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
-        self.tbl.doubleClicked.connect(self._open_item)
-        v.addWidget(self.tbl, 1)
+        outer.addWidget(self.tbl, 1)
 
         # Footer tip
-        tip = QtWidgets.QLabel("Tip: Use Drive… to select E:\\ and scan \\\\.\\E: (Admin EXE). Or Create Image… and scan the .img without admin.")
-        tip.setStyleSheet("color:#9AA3B2;")
-        v.addWidget(tip)
+        self.lblTip = QLabel("Tip: Use Drive… to select E: and scan \\\\.\\E: (Admin EXE). Or Create Image… to scan the image without admin.")
+        self.lblTip.setStyleSheet("color:#9AA3B2")
+        outer.addWidget(self.lblTip)
 
-    # ---- small helpers ----
-    def _parse_bytes(self, s: str) -> int:
-        s = (s or "0").strip().lower()
-        if s in ("0","","none"): return 0
-        m=1
-        if s.endswith("k"): m=1024; s=s[:-1]
-        elif s.endswith("m"): m=1024*1024; s=s[:-1]
-        elif s.endswith("g"): m=1024*1024*1024; s=s[:-1]
-        try: return int(float(s)*m)
-        except: return 0
+    def _wire(self):
+        self.btnFile.clicked.connect(self._pick_file)
+        self.btnDrive.clicked.connect(self._pick_drive)
+        self.btnOut.clicked.connect(self._pick_out)
+        self.btnStart.clicked.connect(self._start)
+        self.btnPause.clicked.connect(self._toggle_pause)
+        self.btnStop.clicked.connect(self._stop)
+        self.btnImage.clicked.connect(self._create_image)
 
-    # ---- browse actions ----
+        # periodic ETA refresh
+        self._eta_timer = QTimer(self); self._eta_timer.setInterval(750); self._eta_timer.timeout.connect(self._refresh_eta)
+
+    def _reset_state(self):
+        self._thread: Optional[QThread] = None
+        self._worker: Optional[Worker]  = None
+        self._last_prog = (0, time.time())   # bytes, ts
+        self._cur = 0
+        self._total = 0
+        self.pb.setValue(0); self.pb.setMaximum(1)
+        self.tbl.setRowCount(0)
+        self.setWindowTitle(f"{APP_NAME} Ready")
+
+    # ---------- pickers ----------
     def _pick_file(self):
-        p,_ = QtWidgets.QFileDialog.getOpenFileName(self,"Choose image file")
+        p, _ = QFileDialog.getOpenFileName(self, "Choose disk IMAGE file", "", "Images (*.img *.dd *.bin *.raw *.iso);;All files (*.*)")
         if p: self.edSrc.setText(p)
 
     def _pick_drive(self):
-        d = QtWidgets.QFileDialog.getExistingDirectory(self, r"Choose DRIVE ROOT (select E:\ to scan \\.\E:)")
+        d = QFileDialog.getExistingDirectory(self, r"Choose DRIVE ROOT (select E:\ to scan \\.\E:)")
         if d:
             self.edSrc.setText(to_raw_if_drive(d))
 
     def _pick_out(self):
-        p = QtWidgets.QFileDialog.getExistingDirectory(self,"Choose output folder")
+        p = QFileDialog.getExistingDirectory(self, "Choose output folder")
         if p: self.edOut.setText(p)
 
-    # ---- imaging ----
-    def _create_image(self):
-        src = self.edSrc.text().strip()
-        if not src:
-            QtWidgets.QMessageBox.information(self,"Info",r"Pick a drive with Drive… or type \\.\E:")
-            return
-        out, _ = QtWidgets.QFileDialog.getSaveFileName(self,"Save raw image as","","Raw image (*.img)")
-        if not out: return
-        self.pb.setRange(0,1); self.pb.setValue(0); self.lbl.setText("Imaging…")
-        self._img_thread = QtCore.QThread(self)
-        self._img_worker = ImageWorker(src, out)
-        self._img_worker.moveToThread(self._img_thread)
-        self._img_thread.started.connect(self._img_worker.run)
-        self._img_worker.progress.connect(self._on_prog)
-        self._img_worker.done.connect(lambda p: (self._img_thread.quit(), self._img_thread.wait(), self.lbl.setText(f"Image saved: {p}")))
-        self._img_worker.error.connect(self._err)
-        self._img_thread.start()
+    # ---------- helpers ----------
+    def _parse_bytes(self, s: str) -> int:
+        s = (s or "0").strip().lower()
+        if s in ("0", "", "none"): return 0
+        mul = 1
+        if s.endswith("k"): mul = 1024; s = s[:-1]
+        elif s.endswith("m"): mul = 1024*1024; s = s[:-1]
+        elif s.endswith("g"): mul = 1024*1024*1024; s = s[:-1]
+        return int(float(s) * mul)
 
-    # ---- scanning ----
+    # ---------- run ----------
     def _start(self):
         src = self.edSrc.text().strip()
         out = self.edOut.text().strip()
         if not src:
-            QtWidgets.QMessageBox.warning(self,"Missing",r"Pick a source (image file or \\.\E:)")
+            QMessageBox.warning(self, "Missing", r"Pick an image, or pick a drive (\\.\E:)")
             return
         if not out:
-            QtWidgets.QMessageBox.warning(self,"Missing","Choose an output folder")
+            QMessageBox.warning(self, "Missing", "Choose an output folder")
             return
-        # Basic safety: warn if output seems to be on same disk (user can override)
-        if not self.ckSame.isChecked() and os.name=="nt" and src.startswith(r"\\.\\".rstrip("\\")):
-            QtWidgets.QMessageBox.warning(self,"Safety","Output on the same physical disk can cause overwrites. Tick 'Allow same-disk' to continue.")
-            return
+
+        # reset UI
+        self.tbl.setRowCount(0)
+        self._cur = 0; self._total = 0
+        self.pb.setValue(0); self.pb.setMaximum(1)
+        self._eta_timer.start()
+        self.btnStart.setEnabled(False); self.btnPause.setEnabled(True); self.btnStop.setEnabled(True)
 
         opts = dict(
             chunk=self._parse_bytes(self.edChunk.text()),
-            overlap=self._parse_bytes(self.edOv.text()),
-            max_bytes=self._parse_bytes(self.edMaxB.text()),
-            min_size=self._parse_bytes(self.edMin.text()),
-            max_files=int(self.spMax.value()),
-            start=0,
-            dedup=self.ckDedup.isChecked(),
+            overlap=self._parse_bytes(self.edOverlap.text()),
+            max_bytes=self._parse_bytes(self.edMaxBytes.text()),
+            min_size=self._parse_bytes(self.edMinSize.text()),
+            max_files=self.spMaxFiles.value(),
+            fast_index=self.ckFast.isChecked(),
+            dedup=self.ckDedup.isChecked()
         )
 
-        self.tbl.setRowCount(0)
-        self.pb.setRange(0, 100); self.pb.setValue(0)
-        self.lbl.setText("Scanning…")
-        self.btnStart.setEnabled(False)
-
-        self._thread = QtCore.QThread(self)
-        self._worker = ScanWorker(src, out, opts)
+        self._thread = QThread(self)
+        self._worker = Worker(src, out, opts)
         self._worker.moveToThread(self._thread)
 
         self._thread.started.connect(self._worker.run)
-        self._worker.progress.connect(self._on_prog)
-        self._worker.item.connect(self._on_item)
+        self._worker.progress.connect(self._on_progress)
+        self._worker.found.connect(self._on_found)
+        self._worker.status.connect(lambda s: self.setWindowTitle(f"{APP_NAME} • {s}"))
+        self._worker.error.connect(self._on_error)
         self._worker.done.connect(self._on_done)
-        self._worker.error.connect(self._err)
+
         self._thread.start()
 
-    def _pause_resume(self):
+    def _toggle_pause(self):
         if not self._worker: return
-        if self.btnPause.text()=="Pause":
-            self._worker.pause(); self.btnPause.setText("Resume"); self.lbl.setText("Paused")
+        if self.btnPause.text() == "Pause":
+            self._worker.pause(True); self.btnPause.setText("Resume")
         else:
-            self._worker.resume(); self.btnPause.setText("Pause"); self.lbl.setText("Scanning…")
+            self._worker.pause(False); self.btnPause.setText("Pause")
 
     def _stop(self):
-        if self._worker:
-            self._worker.stop()
+        if self._worker: self._worker.stop()
 
-    # ---- UI sinks ----
-    @QtCore.Slot(int,int)
-    def _on_prog(self, cur: int, total: int):
-        # compute percent + ETA
-        if not hasattr(self, "_time_mark"):
-            self._time_mark = time.time(); self._pos_mark = cur
-        now = time.time(); dt = max(0.001, now - getattr(self, "_time_mark", now))
-        sp = (cur - getattr(self, "_pos_mark", 0)) / dt
-        if sp < 1: sp = 1
+    @Slot(int, int)
+    def _on_progress(self, cur: int, total: int):
+        self._cur = cur; self._total = total
         if total > 0:
-            pct = int(min(100, max(0, cur*100//total)))
-            self.pb.setValue(pct)
-            remain = (total - cur) / sp
-            self.lbl.setText(f"Scanned {cur:,}/{total:,} ({pct}%) • {sp/1024/1024:.1f} MB/s • ETA {int(remain//60)}m{int(remain%60)}s")
+            self.pb.setMaximum(total)
+            self.pb.setValue(min(cur, total))
         else:
-            self.pb.setRange(0,0)
-            self.lbl.setText(f"Scanned {cur:,} • {sp/1024/1024:.1f} MB/s")
+            # unknown total: keep max=1 and value toggling to show activity
+            self.pb.setMaximum(0)
 
-        self._time_mark = now; self._pos_mark = cur
+    @Slot(object)
+    def _on_found(self, r):
+        # r fields expected: sig.name, start, end, out_path, ok, note
+        row = self.tbl.rowCount()
+        self.tbl.insertRow(row)
+        def _set(c, v): self.tbl.setItem(row, c, QTableWidgetItem(str(v)))
+        _set(0, getattr(r.sig, "name", "?"))
+        start = getattr(r, "start", 0)
+        end   = getattr(r, "end", start)
+        _set(1, start)
+        _set(2, max(0, end - start))
+        _set(3, getattr(r, "out_path", ""))
+        _set(4, getattr(r, "ok", False))
+        _set(5, getattr(r, "note", ""))
 
-    @QtCore.Slot(object)
-    def _on_item(self, r: CarveResult):
-        row = self.tbl.rowCount(); self.tbl.insertRow(row)
-        vals = [r.sig.name, str(r.start), str(r.end-r.start), r.out_path, str(r.ok), r.note]
-        for col, val in enumerate(vals):
-            it = QtWidgets.QTableWidgetItem(val)
-            self.tbl.setItem(row, col, it)
-
-    @QtCore.Slot()
+    @Slot()
     def _on_done(self):
-        self.btnStart.setEnabled(True)
-        self.lbl.setText("Done")
+        self._eta_timer.stop()
+        self.btnStart.setEnabled(True); self.btnPause.setEnabled(False); self.btnStop.setEnabled(False)
+        self.btnPause.setText("Pause")
+        self.setWindowTitle(f"{APP_NAME} Done")
+        if self._thread:
+            self._thread.quit(); self._thread.wait(1500)
+        self._thread = None; self._worker = None
 
-    @QtCore.Slot(str)
-    def _err(self, msg: str):
-        QtWidgets.QMessageBox.critical(self,"Error", msg)
+    @Slot(str)
+    def _on_error(self, msg: str):
+        self._eta_timer.stop()
+        QMessageBox.critical(self, "Error", msg)
+        self._on_done()
 
-    def _open_item(self):
-        rows = self.tbl.selectionModel().selectedRows()
-        if not rows: return
-        r = rows[0].row()
-        path = self.tbl.item(r, 3).text()
-        if os.path.exists(path):
-            if os.name=="nt":
-                os.startfile(path)
-            else:
-                QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(path))
+    def _refresh_eta(self):
+        if self._total <= 0 or self._cur <= 0: return
+        now = time.time()
+        cur, last_ts = self._last_prog
+        dt = max(0.001, now - last_ts)
+        spd = max(1, self._cur - cur) / dt  # bytes/sec
+        rem = max(0, self._total - self._cur)
+        eta_s = int(rem / spd) if spd > 0 else 0
+        pct = (self._cur / self._total) * 100.0
+        self.setWindowTitle(f"{APP_NAME} • {pct:.1f}% • {self._cur/1e9:.2f}/{self._total/1e9:.2f} GB • {spd/1e6:.1f} MB/s • ETA {self._fmt(eta_s)}")
+        self._last_prog = (self._cur, now)
 
-def main():
-    app = QtWidgets.QApplication(sys.argv)
+    @staticmethod
+    def _fmt(s:int) -> str:
+        m, s = divmod(s, 60); h, m = divmod(m, 60)
+        if h: return f"{h:d}h {m:02d}m"
+        if m: return f"{m:d}m {s:02d}s"
+        return f"{s:d}s"
+
+    # ---------- imaging ----------
+    def _create_image(self):
+        src = self.edSrc.text().strip()
+        if not src:
+            QMessageBox.information(self, "Info", r"Pick a drive with Drive… or type \\.\E:")
+            return
+        src = to_raw_if_drive(src)
+        out, _ = QFileDialog.getSaveFileName(self, "Save raw image as", "", "Raw image (*.img)")
+        if not out: return
+
+        self.setWindowTitle(f"{APP_NAME} • Imaging…")
+        self.pb.setMaximum(0); self.pb.setValue(0)
+
+        def job():
+            try:
+                # Simple 1 MiB copy with backoff on read errors
+                # Works for raw device paths and normal files
+                total = 0
+                bs_list = [1024*1024, 256*1024, 64*1024, 4096]
+                with open(src, "rb", buffering=0) as fi, open(out, "wb", buffering=0) as fo:
+                    while True:
+                        try:
+                            b = fi.read(bs_list[0])
+                        except Exception:
+                            b = b"";  # try smaller reads
+                            for bs in bs_list[1:]:
+                                try: b = fi.read(bs); break
+                                except Exception: b = b""
+                            if not b:
+                                # skip a small region and continue
+                                try: fi.seek(fi.tell() + 4096)
+                                except Exception: break
+                                continue
+                        if not b: break
+                        fo.write(b); total += len(b)
+                        self.pb.setMaximum(0)  # keeps animating
+                self.setWindowTitle(f"{APP_NAME} • Imaging complete")
+            except Exception as e:
+                QMessageBox.critical(self, "Error", str(e))
+            finally:
+                self.pb.setMaximum(1); self.pb.setValue(0)
+
+        threading.Thread(target=job, daemon=True).start()
+
+
+def main() -> int:
+    app = QApplication([])
     app.setStyleSheet(QSS)
     w = Main()
     w.show()
-    sys.exit(app.exec())
+    return app.exec()

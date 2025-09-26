@@ -3,21 +3,19 @@ name: Windows Build (EXE + Installer)
 on:
   push:
     branches: [ main ]
-    tags: [ 'v*' ]
+    tags:     [ 'v*' ]
   pull_request:
 
 jobs:
   build:
     runs-on: windows-latest
-    env:
-      APP_NAME: SprigOpenRecover
-      # Use tag as version if present, else run number
-      APP_VERSION: ${{ github.ref_type == 'tag' && github.ref_name || github.run_number }}
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+      - name: Setup Python
+        uses: actions/setup-python@v5
         with:
           python-version: '3.12'
 
@@ -25,47 +23,55 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
+          pip install pyinstaller
 
       - name: Clean old build
         shell: pwsh
         run: |
-          if (Test-Path dist)  { Remove-Item dist  -Recurse -Force }
+          if (Test-Path dist)  { Remove-Item dist -Recurse -Force }
           if (Test-Path build) { Remove-Item build -Recurse -Force }
 
+      # Build a single Admin EXE (raw-disk access needs elevation)
       - name: Build EXE (PyInstaller)
         shell: pwsh
         run: |
-          # NOTE: --paths src is essential for a src/ layout
+          $logo = "src/openrecover/assets/spriglogo.png"
+          $main = "src/main.py"
           pyinstaller -F -w `
-            --name $env:APP_NAME `
-            --paths src `
-            --add-data "src/openrecover/assets/spriglogo.png;openrecover/assets" `
-            src/main.py
-          if (!(Test-Path "dist\$env:APP_NAME.exe")) { throw "EXE not produced" }
+            --name SprigOpenRecover `
+            --uac-admin `
+            --hidden-import PySide6 `
+            --hidden-import PySide6.QtCore `
+            --hidden-import PySide6.QtGui `
+            --hidden-import PySide6.QtWidgets `
+            --add-data "$logo;openrecover/assets" `
+            $main
 
       - name: Locate built EXE
+        id: findexe
         shell: pwsh
-        run: Get-ChildItem dist | Select-Object Name,Length,LastWriteTime
+        run: |
+          $dist = (Resolve-Path "dist").Path
+          $exe  = Join-Path $dist "SprigOpenRecover.exe"
+          if (!(Test-Path $exe)) { throw "SprigOpenRecover.exe not found in $dist" }
+          "dist=$dist" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "exe=$exe"   | Out-File -FilePath $env:GITHUB_OUTPUT -Append
 
       - name: Install Inno Setup
         shell: pwsh
-        run: choco install innosetup --no-progress -y
+        run: choco install innosetup --no-progress
 
       - name: Build installer (Inno Setup)
         shell: pwsh
         run: |
-          $dist = (Resolve-Path dist).Path
-          $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
-          & $iscc "installer\OpenRecoverProQt.iss" /DReleaseDist="$dist" /DAppVersion="$env:APP_VERSION" /DAppName="$env:APP_NAME"
-
-      - name: Show installer output
-        shell: pwsh
-        run: Get-ChildItem installer\output | Select-Object Name,Length,LastWriteTime
+          $dist = "${{ steps.findexe.outputs.dist }}"
+          $ver  = "${{ github.run_number }}"
+          iscc "installer\OpenRecoverProQt.iss" /DReleaseDist="$dist" /DAppVer="$ver"
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: windows-build-${{ env.APP_VERSION }}
+          name: windows-build
           path: |
-            dist/*.exe
-            installer/output/*.exe
+            dist\SprigOpenRecover.exe
+            installer\Output\*.exe

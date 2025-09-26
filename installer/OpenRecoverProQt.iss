@@ -4,11 +4,11 @@
 #endif
 
 #ifndef ReleaseDist
-  #error "Pass /DReleaseDist=""<dist path>"" (points to folder containing SprigOpenRecover.exe)."
+  #error "Pass /DReleaseDist=""<dist path>"" (folder that contains SprigOpenRecover.exe)."
 #endif
 
 [Setup]
-AppId={{F1DE5A8A-1BC3-4D5A-B1B4-8F0E3A8E1B7C}
+AppId={{A9625A0C-3E62-4C2C-B3A9-9FAD5E5193B4}
 AppName={#AppName}
 AppVersion={#AppVersion}
 AppPublisher="OpenRecover Project"
@@ -22,7 +22,6 @@ ArchitecturesInstallIn64BitMode=x64
 WizardStyle=modern
 
 [Files]
-; This is the EXE we copied there in the workflow
 Source: "{#ReleaseDist}\SprigOpenRecover.exe"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]

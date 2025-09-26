@@ -3,7 +3,7 @@ name: Windows Build (EXE + Installer)
 on:
   push:
     branches: [ main ]
-    tags: [ 'v*' ]
+    tags:     [ 'v*' ]
   pull_request:
 
 jobs:
@@ -11,61 +11,52 @@ jobs:
     runs-on: windows-latest
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
 
       - name: Install deps
         run: |
           python -m pip install --upgrade pip
-          pip install -r src/requirements.txt
-          pip install pyinstaller pyinstaller-hooks-contrib
+          pip install -r requirements.txt
+          pip install pyinstaller==6.15
 
       - name: Clean old build
         shell: pwsh
         run: |
           if (Test-Path dist)  { Remove-Item dist  -Recurse -Force }
           if (Test-Path build) { Remove-Item build -Recurse -Force }
-          if (-not (Test-Path installer\dist)) { New-Item -ItemType Directory -Path installer\dist | Out-Null }
 
-      - name: Build EXE (single Admin)
+      - name: Build EXE (single Admin build)
         shell: pwsh
         run: |
-          pyinstaller --noconfirm --clean -F -w `
+          pyinstaller -F -w -n SprigOpenRecover `
             --paths src `
             --collect-all PySide6 `
-            --collect-all shiboken6 `
-            --hidden-import openrecover.gui_qt `
-            --hidden-import openrecover.carver `
-            --hidden-import openrecover.rawio `
-            --hidden-import openrecover.signatures `
-            --add-data "src\openrecover\assets\spriglogo.png;openrecover\assets" `
-            -n SprigOpenRecover src\main.py
-
-          Copy-Item ".\dist\SprigOpenRecover.exe" ".\installer\dist\SprigOpenRecover.exe" -Force
+            --collect-qt-plugins=platforms,styles,imageformats `
+            --hidden-import PySide6 `
+            --hidden-import PySide6.QtCore `
+            --hidden-import PySide6.QtGui `
+            --hidden-import PySide6.QtWidgets `
+            --add-data "src/openrecover/assets/spriglogo.png;openrecover/assets" `
+            src/main.py
+          dir dist
 
       - name: Install Inno Setup
-        run: choco install innosetup -y --no-progress
+        run: choco install innosetup --no-progress
 
       - name: Build installer
         shell: pwsh
         run: |
-          $dist  = Join-Path $env:GITHUB_WORKSPACE "installer\dist"
-          $ver   = "${{ github.ref_name }}"
-          if (-not $ver -or $ver -eq "") { $ver = "0.7-ci" }
-          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" `
-            "/DReleaseDist=$dist" `
-            "/DAppVersion=$ver" `
-            installer\OpenRecoverProQt.iss
+          $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+          & $iscc installer\OpenRecoverProQt.iss /DReleaseDist="$((Get-Location).Path)\dist"
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: windows-build
+          name: Windows-build
           path: |
             dist\SprigOpenRecover.exe
             installer\Output\*.exe

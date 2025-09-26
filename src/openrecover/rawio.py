@@ -1,57 +1,114 @@
-
-import os, ctypes
+import os, sys, ctypes, mmap
 from ctypes import wintypes
-ERROR_INVALID_PARAMETER=87; ERROR_IO_DEVICE=1117; ERROR_CRC=23
-GENERIC_READ=0x80000000; FILE_SHARE_READ=1; FILE_SHARE_WRITE=2; OPEN_EXISTING=3; FILE_ATTRIBUTE_NORMAL=0x80
-FILE_BEGIN,FILE_CURRENT,FILE_END=0,1,2; IOCTL_DISK_GET_LENGTH_INFO=0x0007405C
-CreateFileW=ctypes.windll.kernel32.CreateFileW; ReadFile=ctypes.windll.kernel32.ReadFile
-SetFilePointerEx=ctypes.windll.kernel32.SetFilePointerEx; CloseHandle=ctypes.windll.kernel32.CloseHandle
-DeviceIoControl=ctypes.windll.kernel32.DeviceIoControl; GetLastError=ctypes.windll.kernel32.GetLastError
-class RawError(OSError): pass
-class RawDevice:
-    def __init__(self, path:str, sector_size:int=4096):
-        if os.name!="nt": raise RawError(0,"Windows only")
-        self.path=path; self.sector=sector_size
-        h=CreateFileW(ctypes.c_wchar_p(path), GENERIC_READ, FILE_SHARE_READ|FILE_SHARE_WRITE, None, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, None)
-        if h in (ctypes.c_void_p(-1).value, 0): raise RawError(GetLastError(),"CreateFileW failed")
-        self.handle=h; self.length=self._len()
-    def _len(self)->int:
-        class LI(ctypes.Structure): _fields_=[("QuadPart", ctypes.c_longlong)]
-        out=LI(); ret=wintypes.DWORD()
-        ok=DeviceIoControl(self.handle, IOCTL_DISK_GET_LENGTH_INFO, None,0, ctypes.byref(out), ctypes.sizeof(out), ctypes.byref(ret), None)
-        return int(out.QuadPart) if ok else 0
-    def seek(self, off:int, whence:int=FILE_BEGIN)->bool:
-        newp=ctypes.c_longlong(); return bool(SetFilePointerEx(self.handle, ctypes.c_longlong(off), ctypes.byref(newp), whence))
-    def _read_once(self, n:int)->bytes:
-        buf=ctypes.create_string_buffer(n); got=wintypes.DWORD()
-        ok=ReadFile(self.handle, buf, n, ctypes.byref(got), None)
-        if not ok:
-            err=GetLastError()
-            if err in (ERROR_INVALID_PARAMETER, ERROR_IO_DEVICE, ERROR_CRC): raise RawError(err,"ReadFile failed")
-            raise RawError(err,"ReadFile unexpected error")
-        return buf.raw[:got.value]
-    def read_at(self, offset:int, size:int)->bytes:
-        align=self.sector; base=(offset//align)*align; front=offset-base; need=size+front
-        if self.length: need=min(need, max(0, self.length-base))
-        for chunk in (1024*1024, 256*1024, 64*1024, 4096):
-            pos=base; remain=need; parts=[]; ok=True
-            while remain>0:
-                sz=min(chunk,remain)
-                if not self.seek(pos, FILE_BEGIN): ok=False; break
-                try: data=self._read_once(sz)
-                except RawError: ok=False; break
-                if not data: ok=False; break
-                parts.append(data); pos+=len(data); remain-=len(data)
-            if ok:
-                blob=b"".join(parts); return blob[front:front+size]
-        raise RawError(ERROR_INVALID_PARAMETER, f"read_at failed at {offset}")
-    def close(self):
-        if getattr(self,"handle",None): CloseHandle(self.handle); self.handle=None
-    def __enter__(self): return self
-    def __exit__(self,a,b,c): self.close()
-def to_raw_if_drive(path:str)->str:
-    drive,_=os.path.splitdrive(path)
-    if drive:
-        letter=drive.replace(":","").strip()
-        if len(letter)==1 and letter.isalpha(): return r"\\.\%s:"%letter.upper()
+from typing import Optional
+
+def to_raw_if_drive(path: str) -> str:
+    """
+    If the user gives 'E:', 'E:\\' or a folder on E:, return '\\\\.\\E:'.
+    Otherwise return path unchanged.
+    """
+    p = (path or "").strip()
+    if os.name == "nt":
+        # Normalize like E:\something -> E:
+        if len(p) >= 2 and p[1] == ":" and p[0].isalpha():
+            drive = p[0].upper()
+            return r"\\.\%s:" % drive
     return path
+
+# ---------- Windows raw device ----------
+
+GENERIC_READ  = 0x80000000
+OPEN_EXISTING = 3
+FILE_SHARE_READ  = 0x00000001
+FILE_SHARE_WRITE = 0x00000002
+FILE_ATTRIBUTE_NORMAL = 0x00000080
+INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
+IOCTL_DISK_GET_LENGTH_INFO = 0x0007405c
+
+class LARGE_INTEGER(ctypes.Structure):
+    _fields_ = [("QuadPart", ctypes.c_longlong)]
+
+class RawDevice:
+    """
+    Simple raw-device reader for Windows (e.g. '\\\\.\\E:').
+    """
+    def __init__(self, path: str, sector: int = 4096):
+        self.path = path
+        self.sector = sector
+        self.handle = None
+        self._open()
+
+    def _open(self):
+        CreateFileW = ctypes.windll.kernel32.CreateFileW
+        CreateFileW.argtypes = [
+            wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
+            wintypes.LPVOID, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE
+        ]
+        CreateFileW.restype = wintypes.HANDLE
+
+        handle = CreateFileW(
+            self.path,
+            GENERIC_READ,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            None,
+            OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL,
+            None
+        )
+        if handle == INVALID_HANDLE_VALUE or handle is None:
+            raise OSError("Failed to open raw device: %s" % self.path)
+        self.handle = handle
+
+    @property
+    def length(self) -> Optional[int]:
+        # query size via IOCTL_DISK_GET_LENGTH_INFO
+        out = LARGE_INTEGER()
+        bytes_ret = wintypes.DWORD(0)
+        ok = ctypes.windll.kernel32.DeviceIoControl(
+            self.handle,
+            IOCTL_DISK_GET_LENGTH_INFO,
+            None, 0,
+            ctypes.byref(out), ctypes.sizeof(out),
+            ctypes.byref(bytes_ret),
+            None
+        )
+        return int(out.QuadPart) if ok else None
+
+    def read_at(self, offset: int, size: int) -> bytes:
+        # Move pointer
+        SetFilePointerEx = ctypes.windll.kernel32.SetFilePointerEx
+        SetFilePointerEx.argtypes = [
+            wintypes.HANDLE, LARGE_INTEGER, ctypes.POINTER(LARGE_INTEGER), wintypes.DWORD
+        ]
+        SetFilePointerEx.restype = wintypes.BOOL
+
+        newpos = LARGE_INTEGER(offset)
+        ok = SetFilePointerEx(self.handle, newpos, None, 0)  # FILE_BEGIN=0
+        if not ok:
+            raise OSError("[SetFilePointerEx] failed at 0x%x" % offset)
+
+        # Read
+        ReadFile = ctypes.windll.kernel32.ReadFile
+        ReadFile.argtypes = [
+            wintypes.HANDLE, wintypes.LPVOID, wintypes.DWORD,
+            ctypes.POINTER(wintypes.DWORD), wintypes.LPVOID
+        ]
+        ReadFile.restype = wintypes.BOOL
+
+        buf = (ctypes.c_ubyte * size)()
+        read = wintypes.DWORD(0)
+        ok = ReadFile(self.handle, ctypes.byref(buf), size, ctypes.byref(read), None)
+        if not ok:
+            raise OSError("[ReadFile] failed at 0x%x" % offset)
+        return bytes(buf[:read.value])
+
+    def close(self):
+        if self.handle:
+            ctypes.windll.kernel32.CloseHandle(self.handle)
+            self.handle = None
+
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:
+            pass

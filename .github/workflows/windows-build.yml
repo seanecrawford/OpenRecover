@@ -3,12 +3,16 @@ name: Windows Build (EXE + Installer)
 on:
   push:
     branches: [ main ]
-    tags:     [ 'v*' ]
+    tags: [ 'v*' ]
   pull_request:
 
 jobs:
   build:
     runs-on: windows-latest
+    env:
+      APP_NAME: SprigOpenRecover
+      # Use tag as version if present, else run number
+      APP_VERSION: ${{ github.ref_type == 'tag' && github.ref_name || github.run_number }}
 
     steps:
       - uses: actions/checkout@v4
@@ -21,7 +25,6 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          pip install pyinstaller==6.15
 
       - name: Clean old build
         shell: pwsh
@@ -32,39 +35,37 @@ jobs:
       - name: Build EXE (PyInstaller)
         shell: pwsh
         run: |
-          pyinstaller -F -w -n SprigOpenRecover `
+          # NOTE: --paths src is essential for a src/ layout
+          pyinstaller -F -w `
+            --name $env:APP_NAME `
             --paths src `
-            --collect-all PySide6 `
-            --collect-qt-plugins=platforms,styles,imageformats `
-            --hidden-import PySide6 `
-            --hidden-import PySide6.QtCore `
-            --hidden-import PySide6.QtGui `
-            --hidden-import PySide6.QtWidgets `
             --add-data "src/openrecover/assets/spriglogo.png;openrecover/assets" `
             src/main.py
+          if (!(Test-Path "dist\$env:APP_NAME.exe")) { throw "EXE not produced" }
 
       - name: Locate built EXE
-        id: findexe
         shell: pwsh
-        run: |
-          $exe = Get-ChildItem -Path dist -Filter SprigOpenRecover.exe -Recurse | Select-Object -First 1
-          if (-not $exe) { throw "SprigOpenRecover.exe not found under dist" }
-          echo "EXE_PATH=$($exe.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append
-          Write-Host "EXE_PATH=$($exe.FullName)"
+        run: Get-ChildItem dist | Select-Object Name,Length,LastWriteTime
 
       - name: Install Inno Setup
-        run: choco install innosetup --no-progress
+        shell: pwsh
+        run: choco install innosetup --no-progress -y
 
-      - name: Build installer (ISCC)
+      - name: Build installer (Inno Setup)
         shell: pwsh
         run: |
+          $dist = (Resolve-Path dist).Path
           $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
-          & $iscc installer\OpenRecoverProQt.iss /DEXEPath="$env:EXE_PATH"
+          & $iscc "installer\OpenRecoverProQt.iss" /DReleaseDist="$dist" /DAppVersion="$env:APP_VERSION" /DAppName="$env:APP_NAME"
+
+      - name: Show installer output
+        shell: pwsh
+        run: Get-ChildItem installer\output | Select-Object Name,Length,LastWriteTime
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: Windows-build
+          name: windows-build-${{ env.APP_VERSION }}
           path: |
-            ${{ env.EXE_PATH }}
-            installer\Output\*.exe
+            dist/*.exe
+            installer/output/*.exe

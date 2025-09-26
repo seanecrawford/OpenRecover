@@ -1,24 +1,25 @@
-#define AppName      "Sprig OpenRecover"
-#ifndef AppVersion
-  #define AppVersion "0.7-ci"
-#endif
+#define ReleaseDist GetEnv("ReleaseDist")
 
 #ifndef ReleaseDist
-  #error "Pass /DReleaseDist=""<dist path>"" (folder that contains SprigOpenRecover.exe)."
+  #error "Pass /DReleaseDist=<dist path> when compiling."
 #endif
 
+#define AppName     "Sprig OpenRecover"
+#define AppVersion  "0.7.0"
+#define AppPublisher "OpenRecover Project"
+
 [Setup]
-AppId={{A9625A0C-3E62-4C2C-B3A9-9FAD5E5193B4}
+AppId={{A9F6E20E-74C0-4BE3-AC28-9D0D8B0AAE10}
 AppName={#AppName}
 AppVersion={#AppVersion}
-AppPublisher="OpenRecover Project"
+AppVerName={#AppName} {#AppVersion}
+AppPublisher={#AppPublisher}
 DefaultDirName={autopf}\{#AppName}
 DefaultGroupName={#AppName}
 OutputBaseFilename=SprigOpenRecover_Setup
 Compression=lzma
 SolidCompression=yes
-PrivilegesRequired=admin
-ArchitecturesInstallIn64BitMode=x64
+PrivilegesRequired=lowest
 WizardStyle=modern
 
 [Files]
@@ -29,7 +30,7 @@ Name: "{group}\{#AppName}"; Filename: "{app}\SprigOpenRecover.exe"
 Name: "{commondesktop}\{#AppName}"; Filename: "{app}\SprigOpenRecover.exe"; Tasks: desktopicon
 
 [Tasks]
-Name: "desktopicon"; Description: "Create &desktop shortcut"; Flags: unchecked
+Name: "desktopicon"; Description: "Create a &desktop icon"; Flags: unchecked
 
 [Run]
 Filename: "{app}\SprigOpenRecover.exe"; Flags: nowait postinstall skipifsilent

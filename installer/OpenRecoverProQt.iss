@@ -1,11 +1,11 @@
-#define ReleaseDist GetEnv("ReleaseDist")
+#define ExePath GetDefine("ExePath")
 
-#ifndef ReleaseDist
-  #error "Pass /DReleaseDist=<dist path> when compiling."
+#ifndef ExePath
+  #error "Pass /DEXEPath=<full path to SprigOpenRecover.exe> to ISCC."
 #endif
 
-#define AppName     "Sprig OpenRecover"
-#define AppVersion  "0.7.0"
+#define AppName      "Sprig OpenRecover"
+#define AppVersion   "0.7.0"
 #define AppPublisher "OpenRecover Project"
 
 [Setup]
@@ -23,10 +23,11 @@ PrivilegesRequired=lowest
 WizardStyle=modern
 
 [Files]
-Source: "{#ReleaseDist}\SprigOpenRecover.exe"; DestDir: "{app}"; Flags: ignoreversion
+; Use the exact EXE path provided by the workflow
+Source: "{#ExePath}"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
-Name: "{group}\{#AppName}"; Filename: "{app}\SprigOpenRecover.exe"
+Name: "{group}\{#AppName}";       Filename: "{app}\SprigOpenRecover.exe"
 Name: "{commondesktop}\{#AppName}"; Filename: "{app}\SprigOpenRecover.exe"; Tasks: desktopicon
 
 [Tasks]

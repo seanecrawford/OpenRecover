@@ -23,32 +23,28 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r src/requirements.txt
-          # harden against subtle import misses during freezing
           pip install pyinstaller
 
       - name: Clean old build
         shell: pwsh
         run: |
-          if (Test-Path dist)   { Remove-Item dist   -Recurse -Force }
-          if (Test-Path build)  { Remove-Item build  -Recurse -Force }
+          if (Test-Path dist)   { Remove-Item dist -Recurse -Force }
+          if (Test-Path build)  { Remove-Item build -Recurse -Force }
           New-Item -ItemType Directory -Path dist | Out-Null
           if (-not (Test-Path installer/dist)) { New-Item -ItemType Directory -Path installer/dist | Out-Null }
 
-      # ---- Single admin EXE (Qt UI) ----
-      - name: Build EXE (single Admin build)
+      - name: Build EXE (single Admin)
         shell: pwsh
         run: |
-          # Build SprigOpenRecover.exe with PyInstaller
           pyinstaller -F -w `
-            -n SprigOpenRecover `
-            src/main.py `
-            --hidden-import PySide6 `
-            --hidden-import PySide6.QtCore `
-            --hidden-import PySide6.QtGui `
-            --hidden-import PySide6.QtWidgets `
-            --add-data "src\openrecover\assets\spriglogo.png;openrecover\assets"
+            --paths src `
+            --hidden-import openrecover.gui_qt `
+            --hidden-import openrecover.carver `
+            --hidden-import openrecover.rawio `
+            --hidden-import openrecover.signatures `
+            --add-data "src\openrecover\assets\spriglogo.png;openrecover\assets" `
+            -n SprigOpenRecover src\main.py
 
-          # Move the EXE where the installer script expects it (installer/dist)
           Copy-Item ".\dist\SprigOpenRecover.exe" ".\installer\dist\SprigOpenRecover.exe" -Force
 
       - name: Install Inno Setup
@@ -57,8 +53,8 @@ jobs:
       - name: Build installer
         shell: pwsh
         run: |
-          $dist = Join-Path $env:GITHUB_WORKSPACE "installer\dist"
-          $ver  = "${{ github.ref_name }}"
+          $dist  = Join-Path $env:GITHUB_WORKSPACE "installer\dist"
+          $ver   = "${{ github.ref_name }}"
           if (-not $ver -or $ver -eq "") { $ver = "0.7-ci" }
           & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" `
             "/DReleaseDist=$dist" `

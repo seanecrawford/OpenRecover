@@ -1,130 +1,257 @@
-import os, hashlib, re
-from typing import List, Optional, Set
-from .signatures import FileSignature, ALL_SIGNATURES
+import os, hashlib
+from dataclasses import dataclass
+from typing import List, Callable, Optional, Iterable, Dict, Tuple
 from .rawio import RawDevice, to_raw_if_drive
+from .signatures import FileSignature
 
+@dataclass
 class CarveResult:
-    def __init__(self,start:int,end:int,sig:FileSignature,out_path:str,sha256:str,ok:bool,note:str=""):
-        self.start=start; self.end=end; self.sig=sig
-        self.out_path=out_path; self.sha256=sha256
-        self.ok=ok; self.note=note
+    sig: FileSignature
+    start: int
+    end: int
+    out_path: str
+    ok: bool
+    note: str
 
-# helper: sanitize filenames
-def _safe_name(s: str) -> str:
-    return re.sub(r'[^a-zA-Z0-9_.@-]', '_', s)
+def _ensure_dir(p: str):
+    os.makedirs(p, exist_ok=True)
 
-class Reader:
-    def __init__(self, source:str):
-        p=to_raw_if_drive(source)
-        self.length=0
-        if os.name=="nt" and p.startswith(r"\\.\\" ):
-            self.dev=RawDevice(p,4096); self._pos=0; self.length=self.dev.length or 0
-        else:
-            self.f=open(p,"rb",buffering=0); self._pos=0
-            try: self.f.seek(0,os.SEEK_END); self.length=self.f.tell(); self.f.seek(0)
-            except Exception: self.length=0
-
-    def read(self,n:int)->bytes:
-        if hasattr(self,"dev"):
-            try: b=self.dev.read_at(self._pos,n)
-            except Exception: b=b""
-            self._pos+=len(b); return b
-        else:
-            b=self.f.read(n); self._pos+=len(b); return b
-
-    def seek(self,off:int,whence:int=os.SEEK_SET)->bool:
-        try:
-            if hasattr(self,"dev"):
-                if whence==os.SEEK_SET: self._pos=off
-                elif whence==os.SEEK_CUR: self._pos+=off
-                elif whence==os.SEEK_END: self._pos=self.length or self._pos
-                return True
-            else:
-                self.f.seek(off,whence); self._pos=self.f.tell(); return True
-        except Exception: return False
-
-    def close(self):
-        if hasattr(self,"dev"): self.dev.close()
-        if hasattr(self,"f"): self.f.close()
+def _long(p: str) -> str:
+    # Windows long path prefix
+    if os.name == "nt":
+        ap = os.path.abspath(p)
+        if not ap.startswith("\\\\?\\"):
+            ap = "\\\\?\\" + ap
+        return ap
+    return p
 
 class FileCarver:
-    def __init__(self, source_path:str, output_dir:str, signatures:List[FileSignature]=None,
-                 chunk:int=16*1024*1024, overlap:int=256*1024, max_files:int=0,
-                 fast_index:bool=False, max_bytes:int=0, min_size:int=256, 
-                 progress_cb=None, deduplicate:bool=True):
-        self.source_path=source_path; self.output_dir=output_dir; self.sigs=signatures or ALL_SIGNATURES
-        self.chunk=max(1024*1024,chunk); self.ov=max(4096,overlap)
-        self.max_files=max_files; self.fast_index=fast_index
-        self.max_bytes=max_bytes; self.min_size=min_size
-        self.progress_cb=progress_cb; self.dedup=deduplicate; self._hashes:Set[str]=set()
-        self.hit_cb=None
-        os.makedirs(self.output_dir,exist_ok=True)
+    """
+    Block scanner with overlap + simple signature-based carving.
+    """
+    def __init__(
+        self,
+        source: str,
+        output_dir: str,
+        signatures: Iterable[FileSignature],
+        chunk: int = 16*1024*1024,
+        overlap: int = 256*1024,
+        max_files: int = 0,
+        fast_index: bool = False,
+        max_bytes: int = 0,
+        min_size: int = 256,
+        start_offset: int = 0,
+        deduplicate: bool = True,
+        progress_cb: Optional[Callable[[int, int], None]] = None,
+        stop_flag: Optional[Callable[[], bool]] = None,
+        pause_flag: Optional[Callable[[], bool]] = None,
+    ):
+        self.src_str = source
+        self.output_dir = output_dir
+        self.signatures = list(signatures)
+        self.chunk = max(4096, chunk)
+        self.overlap = max(0, overlap)
+        self.max_files = max_files
+        self.fast_index = fast_index
+        self.max_bytes = max_bytes
+        self.min_size = min_size
+        self.start_offset = max(0, start_offset)
+        self.dedup = deduplicate
+        self.progress_cb = progress_cb or (lambda a,b: None)
+        self.stop_flag = stop_flag or (lambda: False)
+        self.pause_flag = pause_flag or (lambda: False)
+        self._sha_seen: set[str] = set()
 
-    def _out(self,sig,start,length)->str:
-        d=os.path.join(self.output_dir,sig.name)
-        os.makedirs(d,exist_ok=True)
-        fname=_safe_name(f"{sig.name}_@{start}_len{length}{sig.extensions[0]}")
-        return os.path.join(d,fname)
+        # Decide reader
+        sp = to_raw_if_drive(self.src_str)
+        self._is_raw = (sp.startswith(r"\\.\\".rstrip("\\")) and os.name=="nt")
+        self._raw = RawDevice(sp) if self._is_raw else None
+        self._fin = None
+        if not self._is_raw:
+            self._fin = open(sp, "rb", buffering=0)
 
-    def _stream(self,r,start,total,outp):
-        r.seek(start)
-        remain=total
-        h=hashlib.sha256()
+        # size
+        if self._is_raw:
+            self.total = self._raw.length or 0
+        else:
+            self.total = os.path.getsize(sp)
+
+        # cut by max_bytes
+        if self.max_bytes and self.total:
+            self.total = min(self.total, self.max_bytes)
+
+        _ensure_dir(self.output_dir)
+
+    def close(self):
+        if self._raw:
+            self._raw.close()
+        if self._fin:
+            self._fin.close()
+
+    # ---- low-level read ----
+    def _read_at(self, off: int, size: int) -> bytes:
+        if self._is_raw:
+            return self._raw.read_at(off, size)
+        else:
+            self._fin.seek(off, os.SEEK_SET)
+            return self._fin.read(size)
+
+    # ---- carving helpers ----
+    def _emit(self, cur: int):
+        self.progress_cb(cur, self.total or 0)
+
+    def _sha256(self, data: bytes) -> str:
+        h = hashlib.sha256(); h.update(data); return h.hexdigest()
+
+    def _write_file(self, subdir: str, name: str, data: bytes) -> Tuple[str, Optional[str]]:
+        out_dir = os.path.join(self.output_dir, subdir)
+        _ensure_dir(out_dir)
+        # prevent too long names
+        base = name[:180]
+        out_path = os.path.join(out_dir, base)
         try:
-            with open(outp,"wb") as w:
-                while remain>0:
-                    b=r.read(min(1024*1024,remain))
-                    if not b: break
-                    w.write(b)
-                    h.update(b)
-                    remain-=len(b)
-                    if self.progress_cb:
-                        self.progress_cb(r._pos, getattr(r,"length",0))
-            if remain>0:
-                return False,"","truncated"
-            return True,h.hexdigest(),""
+            with open(_long(out_path), "wb") as fo:
+                fo.write(data)
+            return out_path, None
         except Exception as e:
-            return False,"",f"write error: {str(e)}"
+            return out_path, f"write error: {e}"
 
-    def _from_hdr(self,r,hdr,sig):
-        start=hdr - sig.header_adjust
-        if start<0: return None
-        size=None
-        if sig.size_from_header:
-            try: size=sig.size_from_header(r,start)
-            except Exception: size=None
-        if size is None or size<self.min_size or size>sig.max_size: return None
-        outp=self._out(sig,start,size)
-        if self.fast_index: return CarveResult(start,start+size,sig,outp,"",True,"indexed")
-        ok,sha,note=self._stream(r,start,size,outp)
-        if ok and self.dedup:
-            if sha in self._hashes: 
-                try: os.remove(outp)
-                except Exception: pass
-                return CarveResult(start,start+size,sig,outp,sha,False,"duplicate skipped")
-            self._hashes.add(sha)
-        return CarveResult(start,start+size,sig,outp,sha,ok,note)
+    def _find_footer(self, blob: bytes, sig: FileSignature, start_idx: int) -> Optional[int]:
+        if sig.footer is None:
+            return None
+        idx = blob.find(sig.footer, start_idx + len(sig.header))
+        if idx < 0:
+            return None
+        # Special case PNG: include entire IEND chunk (12 bytes: len(0) + type + CRC)
+        if sig is not None and sig.name == "png":
+            # position points at 'IEND' type (4 bytes). We need 12 bytes from start of len field.
+            # Find the length field preceding the 'IEND' (4 bytes).
+            if idx >= 8:
+                # [len:4][type:4='IEND'][CRC:4]
+                end_idx = idx + 8 + 4
+            else:
+                end_idx = idx + len(sig.footer)
+            return end_idx
+        # Generic: include footer bytes
+        return idx + len(sig.footer)
 
-    def scan(self):
-        r=Reader(self.source_path)
-        try:
-            total=getattr(r,"length",0) or 0; abs_off=0; tail=b""
-            while True:
-                if self.max_files and len(self._hashes)>=self.max_files: break
-                if self.max_bytes and abs_off>=self.max_bytes: break
-                buf=r.read(self.chunk)
-                if not buf: break
-                data=tail+buf
-                for sig in self.sigs:
-                    i=0
-                    while True:
-                        idx=data.find(sig.header,i)
-                        if idx==-1: break
-                        r2=self._from_hdr(r, abs_off - len(tail) + idx, sig)
-                        if r2 and self.hit_cb: self.hit_cb(r2)
-                        i=idx+1
-                tail=data[-min(self.ov,len(data)):]
-                abs_off+=len(buf)
-                if self.progress_cb: self.progress_cb(abs_off,total)
-        finally:
-            r.close()
+    def _size_from_iso_bmff(self, blob: bytes, pos: int, sig: FileSignature) -> Optional[int]:
+        if not sig.size_from_header_iso_bmff:
+            return None
+        off, szlen = sig.size_from_header_iso_bmff
+        if pos + off + szlen <= len(blob):
+            box_size = int.from_bytes(blob[pos+off:pos+off+szlen], "big", signed=False)
+            if box_size > 0:
+                return box_size
+        return None
+
+    # ---- main scan generator ----
+    def scan(self) -> Iterable[CarveResult]:
+        cur = self.start_offset
+        produced = 0
+        overlap = min(self.overlap, self.chunk//2)
+
+        while (self.total == 0 or cur < self.total):
+            if self.stop_flag():
+                break
+            while self.pause_flag():
+                self._emit(cur)
+
+            size = self.chunk
+            if self.total:
+                size = min(size, self.total - cur)
+                if size <= 0:
+                    break
+
+            try:
+                buf = self._read_at(cur, size)
+            except Exception as e:
+                # move forward by a sector to avoid infinite loop on bad zones
+                cur += 4096
+                self._emit(cur)
+                continue
+
+            if not buf:
+                break
+
+            # search signatures
+            for sig in self.signatures:
+                start_index = 0
+                while True:
+                    i = buf.find(sig.header, start_index)
+                    if i < 0:
+                        break
+                    global_pos = cur + i
+
+                    # Try to compute length
+                    data = b""
+                    end_pos = None
+                    # try footer in this chunk
+                    end_in = self._find_footer(buf, sig, i)
+                    if end_in is not None:
+                        end_pos = cur + end_in
+                        data = buf[i:end_in]
+                    else:
+                        # ISO BMFF size from header if possible
+                        size_from = self._size_from_iso_bmff(buf, i, sig)
+                        if size_from and i + size_from <= len(buf):
+                            end_pos = cur + i + size_from
+                            data = buf[i:i+size_from]
+
+                    # If still unknown, read a conservative window externally
+                    if not data:
+                        # read an extra window
+                        read_more = 2 * self.chunk
+                        try:
+                            extra = self._read_at(global_pos, read_more)
+                            # footer search there
+                            if sig.footer:
+                                j = extra.find(sig.footer, len(sig.header))
+                                if j >= 0:
+                                    data = extra[:j + len(sig.footer)]
+                                else:
+                                    data = extra  # best-effort
+                            else:
+                                data = extra  # best-effort
+                            end_pos = global_pos + len(data)
+                        except Exception as e:
+                            data = buf[i:]
+                            end_pos = cur + len(buf)
+
+                    # sanity size
+                    if len(data) < self.min_size:
+                        start_index = i + 1
+                        continue
+
+                    # dedup
+                    ok = True
+                    note = ""
+                    if self.dedup:
+                        sha = self._sha256(data)
+                        if sha in self._sha_seen:
+                            ok = False
+                            note = "duplicate"
+                        else:
+                            self._sha_seen.add(sha)
+
+                    # write file
+                    out_name = f"{sig.name}_{global_pos}_len{len(data)}.{sig.ext}"
+                    out_path, werr = self._write_file(sig.name, out_name, data)
+                    if werr:
+                        ok = False
+                        note = werr
+
+                    res = CarveResult(sig=sig, start=global_pos, end=end_pos or (global_pos+len(data)),
+                                      out_path=out_path, ok=ok, note=note)
+                    yield res
+                    produced += 1
+                    if self.max_files and produced >= self.max_files:
+                        return
+                    start_index = i + 1
+
+            # advance
+            cur += len(buf) - overlap
+            self._emit(cur)
+
+        # done
+        self._emit(self.total or cur)

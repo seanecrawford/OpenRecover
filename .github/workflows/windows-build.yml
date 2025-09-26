@@ -29,7 +29,7 @@ jobs:
           if (Test-Path dist)  { Remove-Item dist  -Recurse -Force }
           if (Test-Path build) { Remove-Item build -Recurse -Force }
 
-      - name: Build EXE (single Admin build)
+      - name: Build EXE (PyInstaller)
         shell: pwsh
         run: |
           pyinstaller -F -w -n SprigOpenRecover `
@@ -42,21 +42,29 @@ jobs:
             --hidden-import PySide6.QtWidgets `
             --add-data "src/openrecover/assets/spriglogo.png;openrecover/assets" `
             src/main.py
-          dir dist
+
+      - name: Locate built EXE
+        id: findexe
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem -Path dist -Filter SprigOpenRecover.exe -Recurse | Select-Object -First 1
+          if (-not $exe) { throw "SprigOpenRecover.exe not found under dist" }
+          echo "EXE_PATH=$($exe.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append
+          Write-Host "EXE_PATH=$($exe.FullName)"
 
       - name: Install Inno Setup
         run: choco install innosetup --no-progress
 
-      - name: Build installer
+      - name: Build installer (ISCC)
         shell: pwsh
         run: |
           $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
-          & $iscc installer\OpenRecoverProQt.iss /DReleaseDist="$((Get-Location).Path)\dist"
+          & $iscc installer\OpenRecoverProQt.iss /DEXEPath="$env:EXE_PATH"
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: Windows-build
           path: |
-            dist\SprigOpenRecover.exe
+            ${{ env.EXE_PATH }}
             installer\Output\*.exe

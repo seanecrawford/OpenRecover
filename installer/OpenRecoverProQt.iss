@@ -1,37 +1,33 @@
-#define ExePath GetDefine("ExePath")
+; ===== OpenRecover / SprigOpenRecover Installer =====
 
-#ifndef ExePath
-  #error "Pass /DEXEPath=<full path to SprigOpenRecover.exe> to ISCC."
-#endif
-
-#define AppName      "Sprig OpenRecover"
-#define AppVersion   "0.7.0"
-#define AppPublisher "OpenRecover Project"
+#define AppName    GetString(DocString("AppName"),    "SprigOpenRecover")
+#define AppVersion GetString(DocString("AppVersion"), "0.0.0")
+#define ReleaseDist GetString(DocString("ReleaseDist"), "..\\dist")
 
 [Setup]
-AppId={{A9F6E20E-74C0-4BE3-AC28-9D0D8B0AAE10}
+AppId={{EFA72C94-76D9-4B3A-8E3C-64AA44C0F889}}
 AppName={#AppName}
 AppVersion={#AppVersion}
-AppVerName={#AppName} {#AppVersion}
-AppPublisher={#AppPublisher}
-DefaultDirName={autopf}\{#AppName}
+AppPublisher=OpenRecover Project
+DefaultDirName={pf}\{#AppName}
 DefaultGroupName={#AppName}
-OutputBaseFilename=SprigOpenRecover_Setup
+DisableProgramGroupPage=yes
+OutputDir=installer\output
+OutputBaseFilename={#AppName}_Setup
 Compression=lzma
 SolidCompression=yes
-PrivilegesRequired=lowest
+PrivilegesRequired=admin
 WizardStyle=modern
 
 [Files]
-; Use the exact EXE path provided by the workflow
-Source: "{#ExePath}"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#ReleaseDist}\{#AppName}.exe"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
-Name: "{group}\{#AppName}";       Filename: "{app}\SprigOpenRecover.exe"
-Name: "{commondesktop}\{#AppName}"; Filename: "{app}\SprigOpenRecover.exe"; Tasks: desktopicon
+Name: "{group}\{#AppName}";           Filename: "{app}\{#AppName}.exe"
+Name: "{commondesktop}\{#AppName}";  Filename: "{app}\{#AppName}.exe"; Tasks: desktopicon
 
 [Tasks]
-Name: "desktopicon"; Description: "Create a &desktop icon"; Flags: unchecked
+Name: "desktopicon"; Description: "Create a desktop icon"; Flags: unchecked
 
 [Run]
-Filename: "{app}\SprigOpenRecover.exe"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\{#AppName}.exe"; Flags: nowait postinstall skipifsilent

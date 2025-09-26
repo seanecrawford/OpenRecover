@@ -23,21 +23,22 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r src/requirements.txt
-          pip install pyinstaller
+          pip install pyinstaller pyinstaller-hooks-contrib
 
       - name: Clean old build
         shell: pwsh
         run: |
-          if (Test-Path dist)   { Remove-Item dist -Recurse -Force }
-          if (Test-Path build)  { Remove-Item build -Recurse -Force }
-          New-Item -ItemType Directory -Path dist | Out-Null
-          if (-not (Test-Path installer/dist)) { New-Item -ItemType Directory -Path installer/dist | Out-Null }
+          if (Test-Path dist)  { Remove-Item dist  -Recurse -Force }
+          if (Test-Path build) { Remove-Item build -Recurse -Force }
+          if (-not (Test-Path installer\dist)) { New-Item -ItemType Directory -Path installer\dist | Out-Null }
 
       - name: Build EXE (single Admin)
         shell: pwsh
         run: |
-          pyinstaller -F -w `
+          pyinstaller --noconfirm --clean -F -w `
             --paths src `
+            --collect-all PySide6 `
+            --collect-all shiboken6 `
             --hidden-import openrecover.gui_qt `
             --hidden-import openrecover.carver `
             --hidden-import openrecover.rawio `

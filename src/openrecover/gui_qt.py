@@ -1,9 +1,9 @@
 from __future__ import annotations
-import os, time, threading, traceback
+import os, time, threading, math, traceback
 from typing import Optional
 
 from PySide6.QtCore import Qt, Signal, Slot, QObject, QThread, QTimer
-from PySide6.QtGui import QPixmap
+from PySide6.QtGui import QPixmap, QImage
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QLabel, QLineEdit, QPushButton,
     QFileDialog, QCheckBox, QSpinBox, QProgressBar, QTableWidget,
@@ -29,7 +29,7 @@ QPushButton{background:#232733;border:1px solid #2F3542;border-radius:8px;paddin
 QPushButton:disabled{opacity:.5;}
 QPushButton#Primary{background:qlineargradient(x1:0,y1:0,x2:1,y2:0,stop:0 #22D3EE,stop:1 #3B82F6);border:none;color:white;font-weight:600;}
 QProgressBar{border:1px solid #2A3040;border-radius:8px;background:#0B0D11;text-align:center;color:#AAB1BD;height:18px;}
-QProgressBar::chunk{background:qlineargradient(x1:0,y1:0,x2:1,y2:0,stop:0 #22D3EE,stop:1 #3B82F6);border-radius:8px;}
+QProgressBar::chunk{background:qlineargradient(x1:0,y1:0,x2:1,y2:0,stop:0 #34D399,stop:1 #10B981);border-radius:8px;}
 QHeaderView::section{background:#171A21;border:1px solid #232733;padding:6px;}
 QTableWidget{gridline-color:#232733;selection-background-color:#3B82F6;}
 """
@@ -42,20 +42,6 @@ class Worker(QObject):
     done     = Signal()
 
     def __init__(self, src: str, out: str, opts: dict):
-        """
-        Create a new worker.
-
-        Parameters
-        ----------
-        src : str
-            Source image or raw device path.
-        out : str
-            Directory where carved files will be written.
-        opts : dict
-            Options dictionary. In addition to numeric and boolean
-            values, this may include a 'signatures' key listing the
-            FileSignature objects to scan for.
-        """
         super().__init__()
         self.src = src
         self.out = out
@@ -63,14 +49,9 @@ class Worker(QObject):
         self.signatures = opts.get('signatures', ALL_SIGNATURES)
         self._pause = threading.Event()
         self._stop = threading.Event()
-        self._pause.clear()
-        self._stop.clear()
 
     @Slot()
     def run(self):
-        """
-        Run the carving process in a worker thread.
-        """
         try:
             self.status.emit("Initializing...")
             carver = FileCarver(
@@ -84,7 +65,10 @@ class Worker(QObject):
                 max_bytes=self.opts["max_bytes"],
                 min_size=self.opts["min_size"],
                 progress_cb=lambda cur, total: self.progress.emit(int(cur), int(total)),
-                deduplicate=self.opts["dedup"]
+                deduplicate=self.opts["dedup"],
+                stop_flag=lambda: self._stop.is_set(),
+                pause_flag=lambda: self._pause.is_set(),
+                write_output=self.opts.get("write_output", True),
             )
             self.status.emit("Scanning…")
             for r in carver.scan():
@@ -99,10 +83,7 @@ class Worker(QObject):
             self.error.emit(traceback.format_exc())
 
     def pause(self, yes: bool):
-        if yes:
-            self._pause.set()
-        else:
-            self._pause.clear()
+        self._pause.set() if yes else self._pause.clear()
 
     def stop(self):
         self._stop.set()
@@ -143,15 +124,13 @@ class Main(QMainWindow):
         self.btnFile = QPushButton("File…")
         self.btnDrive = QPushButton("Drive…")
         self.btnOut = QPushButton("Browse")
-        r = 0
-        io.addWidget(QLabel("Source"), r, 0)
-        io.addWidget(self.edSrc, r, 1, 1, 3)
-        io.addWidget(self.btnFile, r, 4)
-        io.addWidget(self.btnDrive, r, 5)
-        r = 1
-        io.addWidget(QLabel("Output"), r, 0)
-        io.addWidget(self.edOut, r, 1, 1, 3)
-        io.addWidget(self.btnOut, r, 4)
+        io.addWidget(QLabel("Source"), 0, 0)
+        io.addWidget(self.edSrc, 0, 1, 1, 3)
+        io.addWidget(self.btnFile, 0, 4)
+        io.addWidget(self.btnDrive, 0, 5)
+        io.addWidget(QLabel("Output"), 1, 0)
+        io.addWidget(self.edOut, 1, 1, 1, 3)
+        io.addWidget(self.btnOut, 1, 4)
         outer.addWidget(io_card)
 
         opt_card = QWidget(objectName="Card")
@@ -176,21 +155,15 @@ class Main(QMainWindow):
         self.btnStop.setEnabled(False)
 
         c = 0
-        opt.addWidget(QLabel("Chunk"), 0, c); c += 1
-        opt.addWidget(self.edChunk, 0, c); c += 1
-        opt.addWidget(QLabel("Overlap"), 0, c); c += 1
-        opt.addWidget(self.edOverlap, 0, c); c += 1
-        opt.addWidget(QLabel("Max bytes"), 0, c); c += 1
-        opt.addWidget(self.edMaxBytes, 0, c); c += 1
-        opt.addWidget(QLabel("Min size"), 0, c); c += 1
-        opt.addWidget(self.edMinSize, 0, c); c += 1
-        opt.addWidget(QLabel("Max files"), 0, c); c += 1
-        opt.addWidget(self.spMaxFiles, 0, c); c += 1
-        opt.addWidget(self.ckFast, 1, 0, 1, 2)
-        opt.addWidget(self.ckAllow, 1, 2, 1, 3)
-        opt.addWidget(self.ckDedup, 1, 5, 1, 2)
+        opt.addWidget(QLabel("Chunk"),       0,c); c+=1; opt.addWidget(self.edChunk, 0,c); c+=1
+        opt.addWidget(QLabel("Overlap"),     0,c); c+=1; opt.addWidget(self.edOverlap,0,c); c+=1
+        opt.addWidget(QLabel("Max bytes"),   0,c); c+=1; opt.addWidget(self.edMaxBytes,0,c); c+=1
+        opt.addWidget(QLabel("Min size"),    0,c); c+=1; opt.addWidget(self.edMinSize,0,c);  c+=1
+        opt.addWidget(QLabel("Max files"),   0,c); c+=1; opt.addWidget(self.spMaxFiles,0,c); c+=1
+        opt.addWidget(self.ckFast, 1,0,1,2)
+        opt.addWidget(self.ckAllow,1,2,1,3)
+        opt.addWidget(self.ckDedup,1,5,1,2)
 
-        # File type selection checkboxes
         self.sig_checkboxes = {}
         sig_layout = QHBoxLayout()
         for sig in ALL_SIGNATURES:
@@ -201,7 +174,6 @@ class Main(QMainWindow):
         sig_container = QWidget()
         sig_container.setLayout(sig_layout)
         opt.addWidget(sig_container, 2, 0, 1, 6)
-
         opt.addWidget(self.btnImage, 3, 5)
         opt.addWidget(self.btnStart, 3, 6)
         opt.addWidget(self.btnPause, 3, 7)
@@ -218,7 +190,24 @@ class Main(QMainWindow):
         self.tbl.horizontalHeader().setStretchLastSection(True)
         outer.addWidget(self.tbl, 1)
 
-        self.lblTip = QLabel("Tip: Use Drive… to select E: and scan \\\\ \\\\E: (Admin EXE). Or Create Image… to scan the image without admin.")
+        # Preview label and action buttons
+        self.previewLabel = QLabel()
+        self.previewLabel.setAlignment(Qt.AlignCenter)
+        self.previewLabel.setMinimumHeight(200)
+        self.previewLabel.setStyleSheet("border:1px solid #232733;background:#171A21;color:#7BF79E;")
+        outer.addWidget(self.previewLabel)
+
+        action_row = QHBoxLayout()
+        self.btnRecoverSel = QPushButton("Recover Selected")
+        self.btnDiscardSel = QPushButton("Discard Selected")
+        self.btnRecoverSel.setEnabled(False)
+        self.btnDiscardSel.setEnabled(False)
+        action_row.addWidget(self.btnRecoverSel)
+        action_row.addWidget(self.btnDiscardSel)
+        action_row.addStretch(1)
+        outer.addLayout(action_row)
+
+        self.lblTip = QLabel("Tip: Use Drive… to select E: and scan \\ \\E: (Admin EXE). Or Create Image… to scan the image without admin.")
         self.lblTip.setStyleSheet("color:#9AA3B2")
         outer.addWidget(self.lblTip)
 
@@ -230,6 +219,10 @@ class Main(QMainWindow):
         self.btnPause.clicked.connect(self._toggle_pause)
         self.btnStop.clicked.connect(self._stop)
         self.btnImage.clicked.connect(self._create_image)
+        # connect table selection and action buttons
+        self.tbl.itemSelectionChanged.connect(self._on_selection_changed)
+        self.btnRecoverSel.clicked.connect(self._recover_selected)
+        self.btnDiscardSel.clicked.connect(self._discard_selected)
         self._eta_timer = QTimer(self)
         self._eta_timer.setInterval(750)
         self._eta_timer.timeout.connect(self._refresh_eta)
@@ -243,6 +236,10 @@ class Main(QMainWindow):
         self.pb.setValue(0)
         self.pb.setMaximum(1)
         self.tbl.setRowCount(0)
+        self._results: dict[int, object] = {}
+        self.previewLabel.clear()
+        self.btnRecoverSel.setEnabled(False)
+        self.btnDiscardSel.setEnabled(False)
         self.setWindowTitle(f"{APP_NAME} Ready")
 
     def _pick_file(self):
@@ -251,7 +248,7 @@ class Main(QMainWindow):
             self.edSrc.setText(p)
 
     def _pick_drive(self):
-        d = QFileDialog.getExistingDirectory(self, r"Choose DRIVE ROOT (select E:\ to scan \\ \\E:)")
+        d = QFileDialog.getExistingDirectory(self, r"Choose DRIVE ROOT (select E: to scan \\ \\E:)")
         if d:
             self.edSrc.setText(to_raw_if_drive(d))
 
@@ -300,6 +297,7 @@ class Main(QMainWindow):
             fast_index=self.ckFast.isChecked(),
             dedup=self.ckDedup.isChecked(),
             signatures=selected_sigs,
+            write_output=False  # run carver in preview mode
         )
         self._thread = QThread(self)
         self._worker = Worker(src, out, opts)
@@ -339,16 +337,15 @@ class Main(QMainWindow):
     def _on_found(self, r):
         row = self.tbl.rowCount()
         self.tbl.insertRow(row)
-        def _set(c, v):
-            self.tbl.setItem(row, c, QTableWidgetItem(str(v)))
-        _set(0, getattr(r.sig, "name", "?"))
+        self.tbl.setItem(row, 0, QTableWidgetItem(str(getattr(r.sig, "name", "?"))))
         start = getattr(r, "start", 0)
         end   = getattr(r, "end", start)
-        _set(1, start)
-        _set(2, max(0, end - start))
-        _set(3, getattr(r, "out_path", ""))
-        _set(4, getattr(r, "ok", False))
-        _set(5, getattr(r, "note", ""))
+        self.tbl.setItem(row, 1, QTableWidgetItem(str(start)))
+        self.tbl.setItem(row, 2, QTableWidgetItem(str(max(0, end - start))))
+        self.tbl.setItem(row, 3, QTableWidgetItem(str(getattr(r, "out_path", ""))))
+        self.tbl.setItem(row, 4, QTableWidgetItem(str(getattr(r, "ok", False))))
+        self.tbl.setItem(row, 5, QTableWidgetItem(str(getattr(r, "note", ""))))
+        self._results[row] = r
 
     @Slot()
     def _on_done(self):
@@ -365,6 +362,88 @@ class Main(QMainWindow):
         self._eta_timer.stop()
         QMessageBox.critical(self, "Error", msg)
         self._on_done()
+
+    # ---------- selective recovery slots ----------
+    @Slot()
+    def _on_selection_changed(self):
+        selected = self.tbl.selectedItems()
+        if not selected:
+            self.previewLabel.clear()
+            self.btnRecoverSel.setEnabled(False)
+            self.btnDiscardSel.setEnabled(False)
+            return
+        row = selected[0].row()
+        res = self._results.get(row)
+        if not res:
+            self.previewLabel.setText("No data")
+            self.btnRecoverSel.setEnabled(False)
+            self.btnDiscardSel.setEnabled(False)
+            return
+        self.btnRecoverSel.setEnabled(True)
+        self.btnDiscardSel.setEnabled(True)
+        kind = res.sig.name.lower()
+        if kind in ("jpeg", "jpg", "png", "gif"):
+            img = QImage.fromData(res.raw_data)
+            if img.isNull():
+                self.previewLabel.setText("Unsupported format")
+            else:
+                pix = QPixmap.fromImage(img)
+                pix = pix.scaled(self.previewLabel.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                self.previewLabel.setPixmap(pix)
+        else:
+            try:
+                snippet = res.raw_data[:200]
+                text = snippet.decode('utf-8', errors='replace')
+            except Exception:
+                text = '<binary>'
+            self.previewLabel.setText(text)
+
+    @Slot()
+    def _recover_selected(self):
+        selected = self.tbl.selectedItems()
+        if not selected:
+            return
+        row = selected[0].row()
+        res = self._results.get(row)
+        if not res:
+            return
+        out_dir = self.edOut.text().strip()
+        if not out_dir:
+            QMessageBox.warning(self, "No Output", "Please specify an output directory before recovering")
+            return
+        sig = res.sig
+        filename = f"{sig.name}_{res.start}_len{len(res.raw_data)}.{sig.ext}"
+        out_subdir = os.path.join(out_dir, sig.name)
+        os.makedirs(out_subdir, exist_ok=True)
+        out_path = os.path.join(out_subdir, filename)
+        try:
+            with open(out_path, 'wb') as f:
+                f.write(res.raw_data)
+            self.tbl.setItem(row, 3, QTableWidgetItem(out_path))
+            self.tbl.setItem(row, 4, QTableWidgetItem(str(True)))
+            self.tbl.setItem(row, 5, QTableWidgetItem(""))
+            self.btnRecoverSel.setEnabled(False)
+            QMessageBox.information(self, "Recovered", f"File saved to {out_path}")
+        except Exception as e:
+            QMessageBox.critical(self, "Recover Error", str(e))
+
+    @Slot()
+    def _discard_selected(self):
+        selected = self.tbl.selectedItems()
+        if not selected:
+            return
+        row = selected[0].row()
+        self.tbl.removeRow(row)
+        if row in self._results:
+            del self._results[row]
+        # re-index remaining results
+        new_results = {}
+        for i, (r, res) in enumerate(sorted(self._results.items(), key=lambda x: x[0])):
+            new_results[i] = res if r == i else res
+        self._results = new_results
+        self.previewLabel.clear()
+        self.btnRecoverSel.setEnabled(False)
+        self.btnDiscardSel.setEnabled(False)
 
     def _refresh_eta(self):
         if self._total <= 0 or self._cur <= 0:
@@ -383,16 +462,14 @@ class Main(QMainWindow):
     def _fmt(s: int) -> str:
         m, s = divmod(s, 60)
         h, m = divmod(m, 60)
-        if h:
-            return f"{h:d}h {m:02d}m"
-        if m:
-            return f"{m:d}m {s:02d}s"
+        if h: return f"{h:d}h {m:02d}m"
+        if m: return f"{m:d}m {s:02d}s"
         return f"{s:d}s"
 
     def _create_image(self):
         src = self.edSrc.text().strip()
         if not src:
-            QMessageBox.information(self, "Info", r"Pick a drive with Drive… or type \\ .\E:")
+            QMessageBox.information(self, "Info", r"Pick a drive with Drive… or type \\ .\\E:")
             return
         src = to_raw_if_drive(src)
         out, _ = QFileDialog.getSaveFileName(self, "Save raw image as", "", "Raw image (*.img)")
@@ -402,7 +479,6 @@ class Main(QMainWindow):
         self.pb.setMaximum(0); self.pb.setValue(0)
         def job():
             try:
-                total = 0
                 bs_list = [1024*1024, 256*1024, 64*1024, 4096]
                 with open(src, "rb", buffering=0) as fi, open(out, "wb", buffering=0) as fo:
                     while True:
@@ -412,19 +488,14 @@ class Main(QMainWindow):
                             b = b""
                             for bs in bs_list[1:]:
                                 try:
-                                    b = fi.read(bs)
-                                    break
-                                except Exception:
-                                    b = b""
+                                    b = fi.read(bs); break
+                                except Exception: b = b""
                             if not b:
-                                try:
-                                    fi.seek(fi.tell() + 4096)
-                                except Exception:
-                                    break
+                                try: fi.seek(fi.tell() + 4096)
+                                except Exception: break
                                 continue
-                        if not b:
-                            break
-                        fo.write(b); total += len(b)
+                        if not b: break
+                        fo.write(b)
                         self.pb.setMaximum(0)
                 self.setWindowTitle(f"{APP_NAME} • Imaging complete")
             except Exception as e:

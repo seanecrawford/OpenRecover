@@ -30,13 +30,38 @@ class LARGE_INTEGER(ctypes.Structure):
 
 class RawDevice:
     """
-    Simple raw-device reader for Windows (e.g. '\\\\.\\E:').
+    Simple raw-device reader for Windows (e.g. '\\\\.\\E:') and POSIX.
     """
     def __init__(self, path: str, sector: int = 4096):
+        """Create a raw device handle for reading.
+
+        On Windows this initialises the Win32 handle via ``_open``. On
+        POSIX systems it opens the path as a file descriptor using
+        ``os.open``. If a sector size other than the default 4096
+        bytes is required the caller can override ``sector`` but this
+        value is currently unused.
+        """
         self.path = path
         self.sector = sector
-        self.handle = None
-        self._open()
+        # Windows: use Win32 APIs
+        if os.name == "nt":
+            self.handle = None
+            self._open()
+            # POSIX-specific attribute set to None so hasattr checks work
+            self.fd = None  # type: ignore
+        else:
+            # POSIX: use file descriptor
+            self.fd = None  # type: Optional[int]
+            self.handle = None  # type: ignore
+            # Attempt to open the device for reading. O_BINARY is
+            # ignored on platforms that do not define it.
+            flags = os.O_RDONLY
+            if hasattr(os, 'O_BINARY'):
+                flags |= os.O_BINARY  # type: ignore
+            try:
+                self.fd = os.open(self.path, flags)
+            except Exception as e:
+                raise OSError(f"Failed to open raw device: {self.path}: {e}")
 
     def _open(self):
         CreateFileW = ctypes.windll.kernel32.CreateFileW
@@ -45,7 +70,6 @@ class RawDevice:
             wintypes.LPVOID, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE
         ]
         CreateFileW.restype = wintypes.HANDLE
-
         handle = CreateFileW(
             self.path,
             GENERIC_READ,
@@ -62,50 +86,72 @@ class RawDevice:
     @property
     def length(self) -> Optional[int]:
         # query size via IOCTL_DISK_GET_LENGTH_INFO
-        out = LARGE_INTEGER()
-        bytes_ret = wintypes.DWORD(0)
-        ok = ctypes.windll.kernel32.DeviceIoControl(
-            self.handle,
-            IOCTL_DISK_GET_LENGTH_INFO,
-            None, 0,
-            ctypes.byref(out), ctypes.sizeof(out),
-            ctypes.byref(bytes_ret),
-            None
-        )
-        return int(out.QuadPart) if ok else None
+        if os.name == "nt":
+            out = LARGE_INTEGER()
+            bytes_ret = wintypes.DWORD(0)
+            ok = ctypes.windll.kernel32.DeviceIoControl(
+                self.handle,
+                IOCTL_DISK_GET_LENGTH_INFO,
+                None, 0,
+                ctypes.byref(out), ctypes.sizeof(out),
+                ctypes.byref(bytes_ret),
+                None
+            )
+            return int(out.QuadPart) if ok else None
+        else:
+            try:
+                st = os.stat(self.path)
+                return st.st_size
+            except Exception:
+                return None
 
     def read_at(self, offset: int, size: int) -> bytes:
         # Move pointer
-        SetFilePointerEx = ctypes.windll.kernel32.SetFilePointerEx
-        SetFilePointerEx.argtypes = [
-            wintypes.HANDLE, LARGE_INTEGER, ctypes.POINTER(LARGE_INTEGER), wintypes.DWORD
-        ]
-        SetFilePointerEx.restype = wintypes.BOOL
-
-        newpos = LARGE_INTEGER(offset)
-        ok = SetFilePointerEx(self.handle, newpos, None, 0)  # FILE_BEGIN=0
-        if not ok:
-            raise OSError("[SetFilePointerEx] failed at 0x%x" % offset)
-
-        # Read
-        ReadFile = ctypes.windll.kernel32.ReadFile
-        ReadFile.argtypes = [
-            wintypes.HANDLE, wintypes.LPVOID, wintypes.DWORD,
-            ctypes.POINTER(wintypes.DWORD), wintypes.LPVOID
-        ]
-        ReadFile.restype = wintypes.BOOL
-
-        buf = (ctypes.c_ubyte * size)()
-        read = wintypes.DWORD(0)
-        ok = ReadFile(self.handle, ctypes.byref(buf), size, ctypes.byref(read), None)
-        if not ok:
-            raise OSError("[ReadFile] failed at 0x%x" % offset)
-        return bytes(buf[:read.value])
+        if os.name == "nt":
+            # Move pointer
+            SetFilePointerEx = ctypes.windll.kernel32.SetFilePointerEx
+            SetFilePointerEx.argtypes = [
+                wintypes.HANDLE, LARGE_INTEGER, ctypes.POINTER(LARGE_INTEGER), wintypes.DWORD
+            ]
+            SetFilePointerEx.restype = wintypes.BOOL
+            newpos = LARGE_INTEGER(offset)
+            ok = SetFilePointerEx(self.handle, newpos, None, 0)  # FILE_BEGIN=0
+            if not ok:
+                raise OSError("[SetFilePointerEx] failed at 0x%x" % offset)
+            # Read
+            ReadFile = ctypes.windll.kernel32.ReadFile
+            ReadFile.argtypes = [
+                wintypes.HANDLE, wintypes.LPVOID, wintypes.DWORD,
+                ctypes.POINTER(wintypes.DWORD), wintypes.LPVOID
+            ]
+            ReadFile.restype = wintypes.BOOL
+            buf = (ctypes.c_ubyte * size)()
+            read = wintypes.DWORD(0)
+            ok = ReadFile(self.handle, ctypes.byref(buf), size, ctypes.byref(read), None)
+            if not ok:
+                raise OSError("[ReadFile] failed at 0x%x" % offset)
+            return bytes(buf[:read.value])
+        else:
+            # Prefer os.pread when available for atomic read without seek
+            if hasattr(os, 'pread') and self.fd is not None:
+                try:
+                    return os.pread(self.fd, size, offset)
+                except Exception as e:
+                    raise OSError(f"pread failed at 0x{offset:x}: {e}")
+            # fallback: duplicate file descriptor, seek and read
+            with os.fdopen(os.dup(self.fd), 'rb', closefd=True) as f:
+                f.seek(offset)
+                return f.read(size)
 
     def close(self):
-        if self.handle:
-            ctypes.windll.kernel32.CloseHandle(self.handle)
-            self.handle = None
+        if os.name == "nt":
+            if getattr(self, 'handle', None):
+                ctypes.windll.kernel32.CloseHandle(self.handle)
+                self.handle = None
+        else:
+            if getattr(self, 'fd', None) is not None:
+                os.close(self.fd)
+                self.fd = None
 
     def __del__(self):
         try:

@@ -1,6 +1,6 @@
 import os, hashlib
 from dataclasses import dataclass
-from typing import Iterable, Optional, Callable, Tuple
+from typing import Iterable, Optional, Callable
 from .rawio import RawDevice, to_raw_if_drive
 from .signatures import FileSignature
 
@@ -12,6 +12,7 @@ class CarveResult:
     out_path: str
     ok: bool
     note: str
+    raw_data: bytes  # holds the canonical carved data for preview/recovery
 
 def _ensure_dir(p: str):
     os.makedirs(p, exist_ok=True)
@@ -25,9 +26,7 @@ def _long(p: str) -> str:
     return p
 
 class FileCarver:
-    """
-    Block scanner with overlap + simple signature-based carving.
-    """
+    """Block scanner with overlap + simple signature-based carving."""
     def __init__(
         self,
         source: str,
@@ -44,6 +43,7 @@ class FileCarver:
         progress_cb: Optional[Callable[[int, int], None]] = None,
         stop_flag: Optional[Callable[[], bool]] = None,
         pause_flag: Optional[Callable[[], bool]] = None,
+        write_output: bool = True  # new: control whether files are immediately written
     ):
         self.src_str = source
         self.output_dir = output_dir
@@ -56,23 +56,20 @@ class FileCarver:
         self.min_size = min_size
         self.start_offset = max(0, start_offset)
         self.dedup = deduplicate
-        self.progress_cb = progress_cb or (lambda a,b: None)
+        self.progress_cb = progress_cb or (lambda a, b: None)
         self.stop_flag = stop_flag or (lambda: False)
         self.pause_flag = pause_flag or (lambda: False)
+        self.write_output = write_output
         self._sha_seen: set[str] = set()
 
+        # choose reader
         sp = to_raw_if_drive(self.src_str)
         self._is_raw = (sp.startswith(r"\\.\\".rstrip("\\")) and os.name == "nt")
         self._raw = RawDevice(sp) if self._is_raw else None
-        self._fin = None
-        if not self._is_raw:
-            self._fin = open(sp, "rb", buffering=0)
+        self._fin = open(sp, "rb", buffering=0) if not self._is_raw else None
 
-        if self._is_raw:
-            self.total = self._raw.length or 0
-        else:
-            self.total = os.path.getsize(sp)
-
+        # determine total size if possible
+        self.total = (self._raw.length if self._is_raw else os.path.getsize(sp)) or 0
         if self.max_bytes and self.total:
             self.total = min(self.total, self.max_bytes)
 
@@ -98,7 +95,7 @@ class FileCarver:
         from .utils import sha256 as _sha
         return _sha(data)
 
-    def _write_file(self, subdir: str, name: str, data: bytes) -> Tuple[str, Optional[str]]:
+    def _write_file(self, subdir: str, name: str, data: bytes):
         out_dir = os.path.join(self.output_dir, subdir)
         _ensure_dir(out_dir)
         base = name[:180]
@@ -110,27 +107,26 @@ class FileCarver:
         except Exception as e:
             return out_path, f"write error: {e}"
 
-    def _find_footer(self, blob: bytes, sig: FileSignature, start_idx: int) -> Optional[int]:
+    def _find_footer(self, blob: bytes, sig: FileSignature, start_idx: int):
         if sig.footer is None:
             return None
         idx = blob.find(sig.footer, start_idx + len(sig.header))
         if idx < 0:
             return None
-        if sig is not None and sig.name == "png":
-            return idx + len(sig.footer) + 4
+        if sig.name == "png":
+            return idx + len(sig.footer) + 4  # include IEND CRC
         return idx + len(sig.footer)
 
-    def _size_from_iso_bmff(self, blob: bytes, pos: int, sig: FileSignature) -> Optional[int]:
+    def _size_from_iso_bmff(self, blob: bytes, pos: int, sig: FileSignature):
         if not sig.size_from_header_iso_bmff:
             return None
         off, szlen = sig.size_from_header_iso_bmff
         if pos + off + szlen <= len(blob):
             box_size = int.from_bytes(blob[pos+off:pos+off+szlen], "big", signed=False)
-            if box_size > 0:
-                return box_size
+            return box_size if box_size > 0 else None
         return None
 
-    def scan(self) -> Iterable[CarveResult]:
+    def scan(self):
         cur = self.start_offset
         produced = 0
         overlap = min(self.overlap, self.chunk // 2)
@@ -152,7 +148,6 @@ class FileCarver:
                 cur += 4096
                 self._emit(cur)
                 continue
-
             if not buf:
                 break
 
@@ -174,7 +169,7 @@ class FileCarver:
                         size_from = self._size_from_iso_bmff(buf, i, sig)
                         if size_from and i + size_from <= len(buf):
                             end_pos = cur + i + size_from
-                            data = buf[i:i + size_from]
+                            data = buf[i:i+size_from]
 
                     if not data:
                         read_more = 2 * self.chunk
@@ -182,10 +177,7 @@ class FileCarver:
                             extra = self._read_at(global_pos, read_more)
                             if sig.footer:
                                 j = extra.find(sig.footer, len(sig.header))
-                                if j >= 0:
-                                    data = extra[:j + len(sig.footer)]
-                                else:
-                                    data = extra
+                                data = extra[:j + len(sig.footer)] if j >= 0 else extra
                             else:
                                 data = extra
                             end_pos = global_pos + len(data)
@@ -197,25 +189,43 @@ class FileCarver:
                         start_index = i + 1
                         continue
 
+                    from .utils import normalize_carve_data
+                    canonical = normalize_carve_data(sig, data)
                     if self.dedup:
-                        from .utils import normalize_carve_data
-                        canonical = normalize_carve_data(sig, data)
                         sha = self._sha256(canonical)
                         if sha in self._sha_seen:
                             start_index = i + 1
                             continue
                         self._sha_seen.add(sha)
+
+                    # quick validity check for images
+                    import imghdr
+                    imghdr_map = {"jpeg": "jpeg", "jpg": "jpeg", "png": "png", "gif": "gif"}
+                    expected = imghdr_map.get(sig.name.lower())
+                    if expected:
+                        if imghdr.what(None, canonical) != expected:
+                            start_index = i + 1
+                            continue
+
                     ok = True
                     note = ""
+                    out_path = ""
+                    if self.write_output:
+                        out_name = f"{sig.name}_{global_pos}_len{len(data)}.{sig.ext}"
+                        out_path, werr = self._write_file(sig.name, out_name, data)
+                        if werr:
+                            ok = False
+                            note = werr
 
-                    out_name = f"{sig.name}_{global_pos}_len{len(data)}.{sig.ext}"
-                    out_path, werr = self._write_file(sig.name, out_name, data)
-                    if werr:
-                        ok = False
-                        note = werr
-                    res = CarveResult(sig=sig, start=global_pos, end=end_pos or (global_pos + len(data)),
-                                      out_path=out_path, ok=ok, note=note)
-                    yield res
+                    yield CarveResult(
+                        sig=sig,
+                        start=global_pos,
+                        end=end_pos or (global_pos + len(data)),
+                        out_path=out_path,
+                        ok=ok,
+                        note=note,
+                        raw_data=canonical
+                    )
                     produced += 1
                     if self.max_files and produced >= self.max_files:
                         return
@@ -223,5 +233,4 @@ class FileCarver:
 
             cur += len(buf) - overlap
             self._emit(cur)
-
         self._emit(self.total or cur)

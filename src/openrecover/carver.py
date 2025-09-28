@@ -101,7 +101,13 @@ class FileCarver:
         self.progress_cb(cur, self.total or 0)
 
     def _sha256(self, data: bytes) -> str:
-        h = hashlib.sha256(); h.update(data); return h.hexdigest()
+        """Return a SHA‑256 hex digest.
+
+        This wrapper delegates to the ``utils.sha256`` function so
+        hashing logic can be centralised and easily patched in tests.
+        """
+        from .utils import sha256 as _sha
+        return _sha(data)
 
     def _write_file(self, subdir: str, name: str, data: bytes) -> Tuple[str, Optional[str]]:
         out_dir = os.path.join(self.output_dir, subdir)
@@ -122,17 +128,15 @@ class FileCarver:
         idx = blob.find(sig.footer, start_idx + len(sig.header))
         if idx < 0:
             return None
-        # Special case PNG: include entire IEND chunk (12 bytes: len(0) + type + CRC)
+        # Special case PNG: include entire IEND chunk (12 bytes).
+        # When locating the footer for a PNG we want to include the 4-byte
+        # ``IEND`` marker and its 4-byte CRC. The 4-byte length field
+        # preceding ``IEND`` is already part of the data slice as it
+        # comes before ``IEND``. Therefore we add ``len(sig.footer)``
+        # (4 bytes) plus 4 additional bytes for the CRC.
         if sig is not None and sig.name == "png":
-            # position points at 'IEND' type (4 bytes). We need 12 bytes from start of len field.
-            # Find the length field preceding the 'IEND' (4 bytes).
-            if idx >= 8:
-                # [len:4][type:4='IEND'][CRC:4]
-                end_idx = idx + 8 + 4
-            else:
-                end_idx = idx + len(sig.footer)
-            return end_idx
-        # Generic: include footer bytes
+            return idx + len(sig.footer) + 4
+        # Generic: include the footer bytes
         return idx + len(sig.footer)
 
     def _size_from_iso_bmff(self, blob: bytes, pos: int, sig: FileSignature) -> Optional[int]:
@@ -223,16 +227,18 @@ class FileCarver:
                         start_index = i + 1
                         continue
 
-                    # dedup
+                    # dedup: normalise data to canonical slice for hashing
+                    if self.dedup:
+                        from .utils import normalize_carve_data
+                        canonical = normalize_carve_data(sig, data)
+                        sha = self._sha256(canonical)
+                        if sha in self._sha_seen:
+                            # Skip duplicate files entirely
+                            start_index = i + 1
+                            continue
+                        self._sha_seen.add(sha)
                     ok = True
                     note = ""
-                    if self.dedup:
-                        sha = self._sha256(data)
-                        if sha in self._sha_seen:
-                            ok = False
-                            note = "duplicate"
-                        else:
-                            self._sha_seen.add(sha)
 
                     # write file
                     out_name = f"{sig.name}_{global_pos}_len{len(data)}.{sig.ext}"

@@ -1,26 +1,17 @@
 import os
 import tempfile
-
 from openrecover.scanner import NTFSScanner
 from openrecover.parser import MFTParser
 from openrecover.recovery import FileRecovery
 from openrecover.parser import ParsedRecord
 
 def _create_mock_mft_record(record_size: int = 64) -> bytes:
-    """Return bytes representing a minimal MFT record for testing.
-
-    The record begins with the 'FILE' signature followed by a small
-    header and a plausible filename. The remainder of the record is
-    padded with NUL bytes.
-    """
-    header = b'FILE' + b'\x00\x00\x00\x00'  # signature + zeros
+    header = b'FILE' + b'\x00\x00\x00\x00'
     name = b'test.txt\x00'
     padding_len = max(0, record_size - len(header) - len(name))
     return header + name + (b'\x00' * padding_len)
 
 def test_scanner_and_parser():
-    """Verify that the scanner detects a mock MFT record and the parser extracts a filename."""
-    import tempfile
     record_size = 64
     rec_bytes = _create_mock_mft_record(record_size)
     data = b'RANDOM' + rec_bytes + b'JUNK'
@@ -40,8 +31,6 @@ def test_scanner_and_parser():
         assert parsed.raw == rec.raw
 
 def test_recovery():
-    """Ensure that the recovery engine writes out the raw record as a file."""
-    import tempfile
     raw = b'FILE\x00\x00\x00\x00hello world'
     parsed = ParsedRecord(record_number=0, file_name='hello.txt', size=0, is_deleted=False, raw=raw)
     with tempfile.TemporaryDirectory() as tmp:

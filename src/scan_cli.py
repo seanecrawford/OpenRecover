@@ -9,12 +9,13 @@ def main():
     p.add_argument("--min-size",type=int,default=256)
     p.add_argument("--dedup",action="store_true")
     args=p.parse_args()
-
     os.makedirs(args.out,exist_ok=True)
     c=FileCarver(args.source,args.out,ALL_SIGNATURES,min_size=args.min_size,deduplicate=args.dedup,
                  progress_cb=lambda cur,total: print(f"{cur}/{total or '?'} bytes"))
-    c.hit_cb=lambda r: print(f"[hit] {r.sig.name} -> {r.out_path}")
-    c.scan()
+    # Note: original code referenced 'hit_cb', which doesn't exist. Use scan results instead.
+    for r in c.scan():
+        if r.ok:
+            print(f"[hit] {r.sig.name} -> {r.out_path}")
 
 if __name__=="__main__":
     main()

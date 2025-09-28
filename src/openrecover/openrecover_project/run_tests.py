@@ -11,7 +11,6 @@ from openrecover.carver import FileCarver
 from openrecover.signatures import PNG
 
 def _create_sample_png() -> bytes:
-    """Return bytes for a minimal 1x1 PNG image."""
     b64 = (
         b"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/"
         b"x8AAwMB/6X6CtwAAAAASUVORK5CYII="
@@ -43,27 +42,16 @@ def test_dedup():
         src_file = os.path.join(tmp, "dup.bin")
         with open(src_file, "wb") as f:
             f.write(data)
-        # deduplicate
         out_dir1 = os.path.join(tmp, "out1")
         c1 = FileCarver(src_file, out_dir1, [PNG], chunk=1024, overlap=0, min_size=0, deduplicate=True)
         results1 = list(c1.scan())
         assert len(results1) == 1, f"dedup true should return 1, got {len(results1)}"
-        # no dedup
         out_dir2 = os.path.join(tmp, "out2")
         c2 = FileCarver(src_file, out_dir2, [PNG], chunk=1024, overlap=0, min_size=0, deduplicate=False)
         results2 = list(c2.scan())
         assert len(results2) == 2, f"dedup false should return 2, got {len(results2)}"
 
 def run_all():
-    """Run a subset of tests without requiring pytest.
-
-    This function manually invokes a handful of test functions to
-    verify the core OpenRecover logic. It is not exhaustive but
-    provides quick feedback without pulling in the full pytest
-    machinery. When adding new tests please import and append them
-    here.
-    """
-    # Import additional tests lazily to avoid side effects
     from tests.test_scanner_parser_recovery import test_scanner_and_parser, test_recovery
     tests = [
         test_png_carver,

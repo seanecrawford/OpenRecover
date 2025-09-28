@@ -1,21 +1,14 @@
-import os, sys, ctypes, mmap
+import os, ctypes
 from ctypes import wintypes
 from typing import Optional
 
 def to_raw_if_drive(path: str) -> str:
-    """
-    If the user gives 'E:', 'E:\\' or a folder on E:, return '\\\\.\\E:'.
-    Otherwise return path unchanged.
-    """
     p = (path or "").strip()
     if os.name == "nt":
-        # Normalize like E:\something -> E:
         if len(p) >= 2 and p[1] == ":" and p[0].isalpha():
             drive = p[0].upper()
             return r"\\.\%s:" % drive
     return path
-
-# ---------- Windows raw device ----------
 
 GENERIC_READ  = 0x80000000
 OPEN_EXISTING = 3
@@ -29,32 +22,16 @@ class LARGE_INTEGER(ctypes.Structure):
     _fields_ = [("QuadPart", ctypes.c_longlong)]
 
 class RawDevice:
-    """
-    Simple raw-device reader for Windows (e.g. '\\\\.\\E:') and POSIX.
-    """
     def __init__(self, path: str, sector: int = 4096):
-        """Create a raw device handle for reading.
-
-        On Windows this initialises the Win32 handle via ``_open``. On
-        POSIX systems it opens the path as a file descriptor using
-        ``os.open``. If a sector size other than the default 4096
-        bytes is required the caller can override ``sector`` but this
-        value is currently unused.
-        """
         self.path = path
         self.sector = sector
-        # Windows: use Win32 APIs
         if os.name == "nt":
             self.handle = None
             self._open()
-            # POSIX-specific attribute set to None so hasattr checks work
             self.fd = None  # type: ignore
         else:
-            # POSIX: use file descriptor
             self.fd = None  # type: Optional[int]
             self.handle = None  # type: ignore
-            # Attempt to open the device for reading. O_BINARY is
-            # ignored on platforms that do not define it.
             flags = os.O_RDONLY
             if hasattr(os, 'O_BINARY'):
                 flags |= os.O_BINARY  # type: ignore
@@ -85,7 +62,6 @@ class RawDevice:
 
     @property
     def length(self) -> Optional[int]:
-        # query size via IOCTL_DISK_GET_LENGTH_INFO
         if os.name == "nt":
             out = LARGE_INTEGER()
             bytes_ret = wintypes.DWORD(0)
@@ -106,19 +82,16 @@ class RawDevice:
                 return None
 
     def read_at(self, offset: int, size: int) -> bytes:
-        # Move pointer
         if os.name == "nt":
-            # Move pointer
             SetFilePointerEx = ctypes.windll.kernel32.SetFilePointerEx
             SetFilePointerEx.argtypes = [
                 wintypes.HANDLE, LARGE_INTEGER, ctypes.POINTER(LARGE_INTEGER), wintypes.DWORD
             ]
             SetFilePointerEx.restype = wintypes.BOOL
             newpos = LARGE_INTEGER(offset)
-            ok = SetFilePointerEx(self.handle, newpos, None, 0)  # FILE_BEGIN=0
+            ok = SetFilePointerEx(self.handle, newpos, None, 0)
             if not ok:
                 raise OSError("[SetFilePointerEx] failed at 0x%x" % offset)
-            # Read
             ReadFile = ctypes.windll.kernel32.ReadFile
             ReadFile.argtypes = [
                 wintypes.HANDLE, wintypes.LPVOID, wintypes.DWORD,
@@ -132,13 +105,11 @@ class RawDevice:
                 raise OSError("[ReadFile] failed at 0x%x" % offset)
             return bytes(buf[:read.value])
         else:
-            # Prefer os.pread when available for atomic read without seek
             if hasattr(os, 'pread') and self.fd is not None:
                 try:
                     return os.pread(self.fd, size, offset)
                 except Exception as e:
                     raise OSError(f"pread failed at 0x{offset:x}: {e}")
-            # fallback: duplicate file descriptor, seek and read
             with os.fdopen(os.dup(self.fd), 'rb', closefd=True) as f:
                 f.seek(offset)
                 return f.read(size)
